@@ -633,7 +633,7 @@ function App() {
             <Empty
               icon={<LightningIcon size={32} />}
               title="Welcome to Codemode"
-              description="AI-powered project management. Ask me to create projects, manage tasks, plan sprints, and more."
+              description="AI-powered project management. Ask me to create projects, manage tasks, plan sprints, and more through namespaced codemode tools like pm.createProject."
             />
           )}
 

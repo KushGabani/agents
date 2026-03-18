@@ -1,6 +1,4 @@
-import type { Executor, ExecuteResult } from "@cloudflare/codemode";
-
-type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
+import type { ExecuteResult, Executor, ToolFns } from "@cloudflare/codemode";
 
 export interface NodeServerExecutorOptions {
   /** URL of the Node executor server, e.g. "http://localhost:3001" */
@@ -29,8 +27,6 @@ export class NodeServerExecutor implements Executor {
 
   async execute(code: string, fns: ToolFns): Promise<ExecuteResult> {
     const execId = crypto.randomUUID();
-
-    // Register tool functions so the DO's onRequest can find them
     this.#registry.set(execId, fns);
 
     try {
@@ -40,7 +36,12 @@ export class NodeServerExecutor implements Executor {
         body: JSON.stringify({
           code,
           callbackUrl: `${this.#callbackUrl}/${execId}`,
-          tools: Object.keys(fns)
+          tools: Object.fromEntries(
+            Object.entries(fns).map(([namespace, group]) => [
+              namespace,
+              Object.keys(group)
+            ])
+          )
         })
       });
 
@@ -64,7 +65,7 @@ export class NodeServerExecutor implements Executor {
 /**
  * Handle an incoming tool callback request.
  *
- * @param request  - the forwarded request (pathname: /node-executor-callback/{agentName}/{execId}/{toolName})
+ * @param request  - the forwarded request (pathname: /node-executor-callback/{agentName}/{execId}/{namespace}/{toolName})
  * @param registry - the Agent-owned Map of execution IDs → tool functions
  */
 export async function handleToolCallback(
@@ -73,15 +74,16 @@ export async function handleToolCallback(
 ): Promise<Response> {
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean);
-  // parts: ["node-executor-callback", agentName, execId, toolName]
+  // parts: ["node-executor-callback", agentName, execId, namespace, toolName]
   const execId = parts[2];
-  const toolName = parts[3];
+  const namespace = parts[3];
+  const toolName = parts[4];
 
-  if (!execId || !toolName) {
+  if (!execId || !namespace || !toolName) {
     return Response.json(
       {
         error:
-          "Invalid callback path — expected /node-executor-callback/{agent}/{execId}/{toolName}"
+          "Invalid callback path — expected /node-executor-callback/{agent}/{execId}/{namespace}/{toolName}"
       },
       { status: 400 }
     );
@@ -95,10 +97,18 @@ export async function handleToolCallback(
     );
   }
 
-  const fn = fns[toolName];
+  const group = fns[namespace];
+  if (!group) {
+    return Response.json(
+      { error: `Namespace "${namespace}" not found` },
+      { status: 404 }
+    );
+  }
+
+  const fn = group[toolName];
   if (!fn) {
     return Response.json(
-      { error: `Tool "${toolName}" not found` },
+      { error: `Tool "${toolName}" not found in namespace "${namespace}"` },
       { status: 404 }
     );
   }

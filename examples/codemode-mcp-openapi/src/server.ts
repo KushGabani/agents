@@ -21,7 +21,6 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): Promise<Response> {
-    // Extract API token from Authorization header
     const authHeader = request.headers.get("Authorization");
     const token = authHeader?.startsWith("Bearer ")
       ? authHeader.slice(7)
@@ -40,65 +39,48 @@ export default {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const server = openApiMcpServer({
-      spec,
-      executor,
-      name: "cloudflare",
-      description: `This server wraps the Cloudflare API. Replace path parameters like {account_id} and {zone_id} with real values from a prior search or list call.
+      apis: {
+        cloudflare: {
+          spec,
+          description:
+            "Cloudflare API. Replace path parameters like {account_id} and {zone_id} with real values from a prior search or list call.",
+          request: async (opts) => {
+            const url = new URL(
+              `https://api.cloudflare.com/client/v4${opts.path}`
+            );
+            if (opts.query) {
+              for (const [key, value] of Object.entries(opts.query)) {
+                if (value !== undefined) {
+                  url.searchParams.set(key, String(value));
+                }
+              }
+            }
 
-// List all zones (accounts the token can access)
-async () => {
-  return await codemode.request({ method: "GET", path: "/zones" });
-}
+            const headers: Record<string, string> = {
+              Authorization: `Bearer ${token}`
+            };
+            if (opts.contentType) {
+              headers["Content-Type"] = opts.contentType;
+            } else if (opts.body) {
+              headers["Content-Type"] = "application/json";
+            }
 
-// List Workers scripts in an account
-async () => {
-  const zones = await codemode.request({ method: "GET", path: "/zones" });
-  const accountId = zones.result[0].account.id;
-  return await codemode.request({
-    method: "GET",
-    path: \`/accounts/\${accountId}/workers/scripts\`
-  });
-}
+            const res = await fetch(url.toString(), {
+              method: opts.method,
+              headers,
+              body: opts.body
+                ? opts.rawBody
+                  ? (opts.body as string)
+                  : JSON.stringify(opts.body)
+                : undefined
+            });
 
-// Create a DNS record
-async () => {
-  return await codemode.request({
-    method: "POST",
-    path: "/zones/{zone_id}/dns_records",
-    body: { type: "A", name: "example.com", content: "1.2.3.4", ttl: 3600 }
-  });
-}`,
-      // This is where you call your API. Runs on the host — auth, base URL,
-      // headers are all yours. The sandbox never sees tokens or secrets.
-      request: async (opts) => {
-        const url = new URL(`https://api.cloudflare.com/client/v4${opts.path}`);
-        if (opts.query) {
-          for (const [key, value] of Object.entries(opts.query)) {
-            if (value !== undefined) url.searchParams.set(key, String(value));
+            return await res.json();
           }
         }
-
-        const headers: Record<string, string> = {
-          Authorization: `Bearer ${token}`
-        };
-        if (opts.contentType) {
-          headers["Content-Type"] = opts.contentType;
-        } else if (opts.body) {
-          headers["Content-Type"] = "application/json";
-        }
-
-        const res = await fetch(url.toString(), {
-          method: opts.method,
-          headers,
-          body: opts.body
-            ? opts.rawBody
-              ? (opts.body as string)
-              : JSON.stringify(opts.body)
-            : undefined
-        });
-
-        return await res.json();
-      }
+      },
+      executor,
+      name: "cloudflare"
     });
 
     return createMcpHandler(server)(request, env, ctx);

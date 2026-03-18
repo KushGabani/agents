@@ -1,12 +1,17 @@
 import { routeAgentRequest, getAgentByName, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
-import { DynamicWorkerExecutor, type Executor } from "@cloudflare/codemode";
+import {
+  DynamicWorkerExecutor,
+  type Executor,
+  type ToolFns
+} from "@cloudflare/codemode";
 import {
   streamText,
   stepCountIs,
   convertToModelMessages,
-  pruneMessages
+  pruneMessages,
+  type ToolSet
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { initDatabase, createTools } from "./tools";
@@ -17,7 +22,8 @@ import {
 
 export type ExecutorType = "dynamic-worker" | "node-server";
 
-type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
+type GroupedTools = Record<string, ToolSet>;
+const LOCAL_NAMESPACE = "pm";
 
 export class Codemode extends AIChatAgent<Env> {
   nodeExecutorRegistry = new Map<string, ToolFns>();
@@ -37,6 +43,26 @@ export class Codemode extends AIChatAgent<Env> {
     return super.onRequest(request);
   }
 
+  getGroupedTools(): GroupedTools {
+    const groupedTools: GroupedTools = {
+      [LOCAL_NAMESPACE]: this.tools
+    };
+
+    const mcpTools = this.mcp.getAITools();
+    for (const tool of this.mcp.listTools()) {
+      const key = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
+      const aiTool = mcpTools[key];
+      if (!aiTool) continue;
+
+      if (!groupedTools[tool.serverId]) {
+        groupedTools[tool.serverId] = {};
+      }
+      groupedTools[tool.serverId][tool.name] = aiTool;
+    }
+
+    return groupedTools;
+  }
+
   @callable({ description: "Set the executor type" })
   setExecutor(executorType: ExecutorType) {
     this.executorType = executorType;
@@ -45,18 +71,12 @@ export class Codemode extends AIChatAgent<Env> {
 
   @callable({ description: "Get tool type definitions" })
   getToolTypes() {
-    // Merge local tools with MCP tools for type generation
-    const mcpTools = this.mcp.getAITools();
-    const allTools = { ...this.tools, ...mcpTools };
-    return generateTypes(allTools);
+    return generateTypes(this.getGroupedTools());
   }
 
   @callable({ description: "Add an MCP server to get additional tools" })
   async addMcp(url: string, name?: string) {
     const serverName = name || `mcp-${Date.now()}`;
-    // Use HOST if provided, otherwise it will be derived from the request
-    // For @callable methods (WebSocket RPC), there's no request context,
-    // so HOST must be set in wrangler.jsonc vars for production
     await this.addMcpServer(serverName, url, {
       callbackHost: this.env.HOST
     });
@@ -97,15 +117,11 @@ export class Codemode extends AIChatAgent<Env> {
 
   async onChatMessage() {
     const workersai = createWorkersAI({ binding: this.env.AI });
-
     const executor = this.createExecutor();
-
-    // Merge local tools with MCP tools
-    const mcpTools = this.mcp.getAITools();
-    const allTools = { ...this.tools, ...mcpTools };
+    const groupedTools = this.getGroupedTools();
 
     const codemode = createCodeTool({
-      tools: allTools,
+      tools: groupedTools,
       executor
     });
 
@@ -113,9 +129,9 @@ export class Codemode extends AIChatAgent<Env> {
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful project management assistant. " +
-        "You can create and manage projects, tasks, sprints, and comments using the codemode tool. " +
-        "When you need to perform operations, use the codemode tool to write JavaScript " +
-        "that calls the available functions on the `codemode` object. " +
+        "Use the codemode tool to write JavaScript that calls functions on the `codemode` object using `codemode.<namespace>.<tool>(...)`. " +
+        `Built-in project management tools are under the \`${LOCAL_NAMESPACE}\` namespace, e.g. \`codemode.${LOCAL_NAMESPACE}.createProject(...)\` and \`codemode.${LOCAL_NAMESPACE}.listTasks(...)\`. ` +
+        "If MCP servers are connected, their tools appear under namespaces matching each server id. " +
         `Current executor: ${this.executorType}`,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
