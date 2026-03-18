@@ -1,15 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { asSchema, type ToolSet } from "ai";
+import type { JSONSchema7 } from "json-schema";
 import { z } from "zod";
+import type { Executor, ToolFns } from "./executor";
 import {
   generateTypesFromJsonSchema,
-  type JsonSchemaToolDescriptors
+  type GroupedJsonSchemaToolDescriptors
 } from "./json-schema-types";
+import { generateTypes } from "./tool-types";
 import { sanitizeToolName } from "./utils";
-import type { Executor } from "./executor";
-
-import type { JSONSchema7 } from "json-schema";
 
 // -- Shared utilities --
 
@@ -37,102 +36,25 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// -- codeMcpServer --
-
-const CODE_DESCRIPTION = `Execute code to achieve a goal.
-
-Available:
-{{types}}
-
-Write an async arrow function in JavaScript that returns the result.
-Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
-Do NOT define named functions then call them — just write the arrow function body directly.
-
-{{example}}`;
-
-/**
- * Wrap an existing MCP server with a single codemode `code` tool.
- *
- * Connects to the upstream server via in-memory transport, discovers its
- * tools, and returns a new MCP server with a `code` tool that exposes
- * all upstream tools as typed methods.
- */
-export interface CodeMcpServerOptions {
-  server: McpServer;
-  executor: Executor;
+function buildExampleFromGroups(
+  groups: Record<string, Record<string, unknown>>
+): string {
+  for (const [groupName, tools] of Object.entries(groups)) {
+    const [firstToolEntry] = Object.entries(tools);
+    if (!firstToolEntry) continue;
+    const [toolName] = firstToolEntry;
+    return `Example: async () => { const r = await codemode.${sanitizeToolName(groupName)}.${sanitizeToolName(toolName)}({}); return r; }`;
+  }
+  return "Example: async () => null";
 }
 
-export async function codeMcpServer(
-  options: CodeMcpServerOptions
-): Promise<McpServer> {
-  const { server, executor } = options;
-  const [clientTransport, serverTransport] =
-    InMemoryTransport.createLinkedPair();
-
-  await server.connect(serverTransport);
-
-  const client = new Client({ name: "codemode-proxy", version: "1.0.0" });
-  await client.connect(clientTransport);
-
-  const { tools } = await client.listTools();
-
-  // Build type hints
-  const toolDescriptors: JsonSchemaToolDescriptors = {};
-  for (const tool of tools) {
-    toolDescriptors[tool.name] = {
-      description: tool.description,
-      inputSchema: tool.inputSchema as JSONSchema7
-    };
-  }
-  const types = generateTypesFromJsonSchema(toolDescriptors);
-
-  // Build executor fns — each upstream tool is a direct method
-  const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
-  for (const tool of tools) {
-    const toolName = tool.name;
-    fns[toolName] = async (args: unknown) => {
-      const result = await client.callTool({
-        name: toolName,
-        arguments: args as Record<string, unknown>
-      });
-      return result;
-    };
-  }
-
-  // Build example from first upstream tool with placeholder args
-  const firstTool = tools[0];
-  let example = "";
-  if (firstTool) {
-    const schema = firstTool.inputSchema as {
-      properties?: Record<string, { type?: string; description?: string }>;
-      required?: string[];
-    };
-    const props = schema.properties ?? {};
-    const parts: string[] = [];
-    for (const [key, prop] of Object.entries(props)) {
-      if (prop.type === "number" || prop.type === "integer") {
-        parts.push(`${key}: 0`);
-      } else if (prop.type === "boolean") {
-        parts.push(`${key}: true`);
-      } else {
-        parts.push(`${key}: "..."`);
-      }
-    }
-    const args = parts.length > 0 ? `{ ${parts.join(", ")} }` : "{}";
-    example = `Example: async () => { const r = await codemode.${sanitizeToolName(firstTool.name)}(${args}); return r; }`;
-  }
-
-  const description = CODE_DESCRIPTION.replace("{{types}}", types).replace(
-    "{{example}}",
-    example
-  );
-
-  const codemodeServer = new McpServer({
-    name: "codemode",
-    version: "1.0.0"
-  });
-
-  codemodeServer.registerTool(
+function executeCodeTool(
+  server: McpServer,
+  description: string,
+  executor: Executor,
+  fns: ToolFns
+): void {
+  server.registerTool(
     "code",
     {
       description,
@@ -166,8 +88,67 @@ export async function codeMcpServer(
       }
     }
   );
+}
 
-  return codemodeServer;
+// -- codeMcpServer --
+
+const CODE_DESCRIPTION = `Execute code to achieve a goal.
+
+Available:
+{{types}}
+
+Write an async arrow function in JavaScript that returns the result.
+Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
+Do NOT define named functions then call them — just write the arrow function body directly.
+
+{{example}}`;
+
+export interface CodeMcpServerOptions {
+  tools: Record<string, ToolSet>;
+  executor: Executor;
+  name?: string;
+  version?: string;
+}
+
+export function codeMcpServer(options: CodeMcpServerOptions): McpServer {
+  const { tools, executor, name = "codemode", version = "1.0.0" } = options;
+  const typesByGroup = generateTypes(tools);
+  const combinedTypes = Object.values(typesByGroup).join("\n\n");
+  const description = CODE_DESCRIPTION.replace(
+    "{{types}}",
+    combinedTypes
+  ).replace("{{example}}", buildExampleFromGroups(tools));
+
+  const fns: ToolFns = {};
+  for (const [groupName, groupTools] of Object.entries(tools)) {
+    const sanitizedGroupName = sanitizeToolName(groupName);
+    fns[sanitizedGroupName] = {};
+
+    for (const [toolName, toolDef] of Object.entries(groupTools)) {
+      const execute = toolDef.execute;
+      if (!execute) continue;
+
+      const rawSchema =
+        "inputSchema" in toolDef
+          ? toolDef.inputSchema
+          : (toolDef as { parameters?: unknown }).parameters;
+      const schema =
+        rawSchema != null
+          ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
+          : undefined;
+      fns[sanitizedGroupName][sanitizeToolName(toolName)] = schema?.validate
+        ? async (args: unknown) => {
+            const result = await schema.validate!(args);
+            if (!result.success) throw result.error;
+            return execute(result.value as never, {} as never);
+          }
+        : async (args: unknown) => execute(args as never, {} as never);
+    }
+  }
+
+  const server = new McpServer({ name, version });
+  executeCodeTool(server, description, executor, fns);
+  return server;
 }
 
 // -- openApiMcpServer --
@@ -181,13 +162,17 @@ export interface RequestOptions {
   rawBody?: boolean;
 }
 
-export interface OpenApiMcpServerOptions {
+export interface ApiDefinition {
   spec: Record<string, unknown>;
-  executor: Executor;
   request: (options: RequestOptions) => Promise<unknown>;
+  description?: string;
+}
+
+export interface OpenApiMcpServerOptions {
+  apis: Record<string, ApiDefinition>;
+  executor: Executor;
   name?: string;
   version?: string;
-  description?: string;
 }
 
 /**
@@ -201,8 +186,9 @@ function resolveRefs(
 ): unknown {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj !== "object") return obj;
-  if (Array.isArray(obj))
+  if (Array.isArray(obj)) {
     return obj.map((item) => resolveRefs(item, root, seen));
+  }
 
   const record = obj as Record<string, unknown>;
 
@@ -232,8 +218,7 @@ function resolveRefs(
   return result;
 }
 
-const SPEC_TYPES = `
-// OpenAPI 3.x spec with $refs resolved inline.
+const OPENAPI_SHARED_TYPES = `// OpenAPI 3.x spec with $refs resolved inline.
 // The spec object follows the standard OpenAPI 3.x structure.
 
 interface OperationObject {
@@ -284,12 +269,6 @@ interface OpenApiSpec {
   tags?: Array<{ name: string; description?: string }>;
 }
 
-declare const codemode: {
-  spec(): Promise<OpenApiSpec>;
-};
-`;
-
-const REQUEST_TYPES = `
 interface RequestOptions {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
@@ -297,149 +276,114 @@ interface RequestOptions {
   body?: unknown;
   contentType?: string;
   rawBody?: boolean;
+}`;
+
+function buildOpenApiTypes(apis: GroupedJsonSchemaToolDescriptors): string {
+  const typesByGroup = generateTypesFromJsonSchema(apis);
+  return `${OPENAPI_SHARED_TYPES}\n\n${Object.values(typesByGroup).join("\n\n")}`;
 }
 
-declare const codemode: {
-  request(options: RequestOptions): Promise<unknown>;
-};
-`;
+function buildOpenApiDescription(
+  apis: GroupedJsonSchemaToolDescriptors,
+  apiDescriptions: string[]
+): string {
+  const firstApi = Object.keys(apis)[0];
+  const safeApi = firstApi ? sanitizeToolName(firstApi) : "api";
+  const details =
+    apiDescriptions.length > 0 ? `\n\n${apiDescriptions.join("\n")}` : "";
 
-/**
- * Create an MCP server with search + execute tools from an OpenAPI spec.
- *
- * The search tool lets the LLM query the spec to find endpoints.
- * The execute tool lets the LLM call the API via a user-provided
- * request function that runs on the host (auth never enters the sandbox).
- */
+  return `Execute API calls using JavaScript code. Inspect specs with codemode.<api>.spec() and make host-side requests with codemode.<api>.request(...).
+
+Available:
+${buildOpenApiTypes(apis)}
+
+Write an async arrow function in JavaScript that returns the result.
+Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
+Do NOT define named functions then call them — just write the arrow function body directly.
+
+Example: async () => {
+  const spec = await codemode.${safeApi}.spec();
+  const path = Object.keys(spec.paths)[0];
+  return await codemode.${safeApi}.request({ method: "GET", path });
+}${details}`;
+}
+
 export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
-  const {
-    executor,
-    request: requestFn,
-    name = "openapi",
-    version = "1.0.0",
-    description
-  } = options;
-
-  const resolved = resolveRefs(options.spec, options.spec);
-
+  const { apis, executor, name = "openapi", version = "1.0.0" } = options;
   const server = new McpServer({ name, version });
 
-  // --- search tool ---
-  server.registerTool(
-    "search",
-    {
-      description: `Search the OpenAPI spec. All $refs are pre-resolved inline.
+  const fns: ToolFns = {};
+  const apiToolDescriptors: GroupedJsonSchemaToolDescriptors = {};
+  const apiDescriptions: string[] = [];
 
-Types:
-${SPEC_TYPES}
+  for (const [apiName, api] of Object.entries(apis)) {
+    const resolvedSpec = resolveRefs(api.spec, api.spec) as Record<
+      string,
+      unknown
+    >;
+    const sanitizedApiName = sanitizeToolName(apiName);
 
-Your code must be an async arrow function that returns the result.
+    fns[sanitizedApiName] = {
+      spec: async () => resolvedSpec,
+      request: async (args: unknown) => api.request(args as RequestOptions)
+    };
 
-Examples:
+    const requestSchema: JSONSchema7 = {
+      type: "object",
+      properties: {
+        method: {
+          type: "string",
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        path: { type: "string" },
+        query: {
+          type: "object",
+          additionalProperties: {
+            anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
+          }
+        },
+        body: true,
+        contentType: { type: "string" },
+        rawBody: { type: "boolean" }
+      },
+      required: ["method", "path"]
+    };
 
-// List all paths
-async () => {
-  const spec = await codemode.spec();
-  return Object.keys(spec.paths);
-}
-
-// Find endpoints by tag
-async () => {
-  const spec = await codemode.spec();
-  const results = [];
-  for (const [path, methods] of Object.entries(spec.paths)) {
-    for (const [method, op] of Object.entries(methods)) {
-      if (op.tags?.some(t => t.toLowerCase() === 'your_tag')) {
-        results.push({ method: method.toUpperCase(), path, summary: op.summary });
+    apiToolDescriptors[apiName] = {
+      spec: {
+        description: api.description
+          ? `Get the fully resolved ${api.description} OpenAPI spec`
+          : `Get the fully resolved ${apiName} OpenAPI spec`,
+        inputSchema: {
+          type: "object",
+          additionalProperties: false
+        },
+        outputSchema: {
+          type: "object",
+          additionalProperties: true
+        }
+      },
+      request: {
+        description: api.description
+          ? `Execute a request against ${api.description}`
+          : `Execute a request against ${apiName}`,
+        inputSchema: requestSchema,
+        outputSchema: {
+          type: "object",
+          additionalProperties: true
+        }
       }
+    };
+
+    if (api.description) {
+      apiDescriptions.push(`- ${sanitizedApiName}: ${api.description}`);
     }
   }
-  return results;
-}`,
-      inputSchema: {
-        code: z
-          .string()
-          .describe("JavaScript async arrow function to search the spec")
-      }
-    },
-    async ({ code }) => {
-      try {
-        const result = await executor.execute(code, {
-          spec: async () => resolved
-        });
-        if (result.error) {
-          return {
-            content: [
-              { type: "text" as const, text: `Error: ${result.error}` }
-            ],
-            isError: true
-          };
-        }
-        return {
-          content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
-          ]
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text" as const, text: `Error: ${formatError(error)}` }
-          ],
-          isError: true
-        };
-      }
-    }
+
+  const description = buildOpenApiDescription(
+    apiToolDescriptors,
+    apiDescriptions
   );
-
-  // --- execute tool ---
-  const executeDescription = `Execute API calls using JavaScript code. First use 'search' to find the right endpoints.
-
-Available in your code:
-${REQUEST_TYPES}
-
-Your code must be an async arrow function that returns the result.
-
-Example:
-async () => {
-  return await codemode.request({ method: "GET", path: "/your/endpoint" });
-}${description ? `\n\n${description}` : ""}`;
-
-  server.registerTool(
-    "execute",
-    {
-      description: executeDescription,
-      inputSchema: {
-        code: z.string().describe("JavaScript async arrow function to execute")
-      }
-    },
-    async ({ code }) => {
-      try {
-        const result = await executor.execute(code, {
-          request: (args: unknown) => requestFn(args as RequestOptions)
-        });
-        if (result.error) {
-          return {
-            content: [
-              { type: "text" as const, text: `Error: ${result.error}` }
-            ],
-            isError: true
-          };
-        }
-        return {
-          content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
-          ]
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text" as const, text: `Error: ${formatError(error)}` }
-          ],
-          isError: true
-        };
-      }
-    }
-  );
-
+  executeCodeTool(server, description, executor, fns);
   return server;
 }

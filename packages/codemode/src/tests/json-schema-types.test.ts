@@ -127,43 +127,47 @@ describe("jsonSchemaToType", () => {
 });
 
 // ---------------------------------------------------------------------------
-// generateTypesFromJsonSchema — MCP-style tool descriptors
+// generateTypesFromJsonSchema — grouped MCP-style tool descriptors
 // ---------------------------------------------------------------------------
 
 describe("generateTypesFromJsonSchema", () => {
-  it("generates types for a single tool with descriptions", () => {
+  it("generates types for a single grouped tool with descriptions", () => {
     const result = generateTypesFromJsonSchema({
-      getWeather: {
-        description: "Get weather for a city",
-        inputSchema: {
-          type: "object",
-          properties: {
-            city: { type: "string", description: "City name" },
-            units: {
-              type: "string",
-              enum: ["celsius", "fahrenheit"]
-            }
-          },
-          required: ["city"]
+      weather: {
+        getWeather: {
+          description: "Get weather for a city",
+          inputSchema: {
+            type: "object",
+            properties: {
+              city: { type: "string", description: "City name" },
+              units: {
+                type: "string",
+                enum: ["celsius", "fahrenheit"]
+              }
+            },
+            required: ["city"]
+          }
         }
       }
     });
 
-    expect(result).toBe(
+    expect(result.weather).toBe(
       [
-        "type GetWeatherInput = {",
+        "type WeatherGetWeatherInput = {",
         "    /** City name */",
         "    city: string;",
         '    units?: "celsius" | "fahrenheit";',
         "}",
-        "type GetWeatherOutput = unknown",
+        "type WeatherGetWeatherOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Get weather for a city",
-        "\t * @param input.city - City name",
-        "\t */",
-        "\tgetWeather: (input: GetWeatherInput) => Promise<GetWeatherOutput>;",
+        "declare namespace codemode {",
+        "    namespace weather {",
+        "        /**",
+        "         * Get weather for a city",
+        "         * @param input.city - City name",
+        "         */",
+        "        function getWeather(input: WeatherGetWeatherInput): Promise<WeatherGetWeatherOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -171,51 +175,54 @@ describe("generateTypesFromJsonSchema", () => {
 
   it("generates types for multiple tools with name sanitization", () => {
     const result = generateTypesFromJsonSchema({
-      search: {
-        description: "Search for items",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string" },
-            limit: { type: "number" }
-          },
-          required: ["query"]
-        }
-      },
-      "get-item": {
-        description: "Get an item by ID",
-        inputSchema: {
-          type: "object",
-          properties: {
-            id: { type: "string" }
-          },
-          required: ["id"]
+      github: {
+        search: {
+          description: "Search for items",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string" },
+              limit: { type: "number" }
+            },
+            required: ["query"]
+          }
+        },
+        "get-item": {
+          description: "Get an item by ID",
+          inputSchema: {
+            type: "object",
+            properties: {
+              id: { type: "string" }
+            },
+            required: ["id"]
+          }
         }
       }
     });
 
-    expect(result).toBe(
+    expect(result.github).toBe(
       [
-        "type SearchInput = {",
+        "type GithubSearchInput = {",
         "    query: string;",
         "    limit?: number;",
         "}",
-        "type SearchOutput = unknown",
-        "type GetItemInput = {",
+        "type GithubSearchOutput = unknown",
+        "type GithubGetItemInput = {",
         "    id: string;",
         "}",
-        "type GetItemOutput = unknown",
+        "type GithubGetItemOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Search for items",
-        "\t */",
-        "\tsearch: (input: SearchInput) => Promise<SearchOutput>;",
-        "",
-        "\t/**",
-        "\t * Get an item by ID",
-        "\t */",
-        "\tget_item: (input: GetItemInput) => Promise<GetItemOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Search for items",
+        "         */",
+        "        function search(input: GithubSearchInput): Promise<GithubSearchOutput>;",
+        "        /**",
+        "         * Get an item by ID",
+        "         */",
+        "        function get_item(input: GithubGetItemInput): Promise<GithubGetItemOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -223,101 +230,144 @@ describe("generateTypesFromJsonSchema", () => {
 
   it("generates typed output schemas when provided", () => {
     const result = generateTypesFromJsonSchema({
-      getUser: {
-        description: "Get a user",
-        inputSchema: {
-          type: "object",
-          properties: { id: { type: "string" } },
-          required: ["id"]
-        },
-        outputSchema: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            email: { type: "string" }
+      github: {
+        getUser: {
+          description: "Get a user",
+          inputSchema: {
+            type: "object",
+            properties: { id: { type: "string" } },
+            required: ["id"]
           },
-          required: ["name", "email"]
+          outputSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              email: { type: "string" }
+            },
+            required: ["name", "email"]
+          }
         }
       }
     });
 
-    expect(result).toBe(
+    expect(result.github).toBe(
       [
-        "type GetUserInput = {",
+        "type GithubGetUserInput = {",
         "    id: string;",
         "}",
-        "type GetUserOutput = {",
+        "type GithubGetUserOutput = {",
         "    name: string;",
         "    email: string;",
         "}",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Get a user",
-        "\t */",
-        "\tgetUser: (input: GetUserInput) => Promise<GetUserOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Get a user",
+        "         */",
+        "        function getUser(input: GithubGetUserInput): Promise<GithubGetUserOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
   });
 
-  it("handles an empty tool set", () => {
-    expect(generateTypesFromJsonSchema({})).toBe("declare const codemode: {}");
+  it("handles an empty grouped tool set", () => {
+    expect(generateTypesFromJsonSchema({})).toEqual({});
   });
 
-  it("generates types from MCP-style tool definitions", () => {
+  it("generates an empty namespace for an empty group", () => {
+    const result = generateTypesFromJsonSchema({ github: {} });
+
+    expect(result.github).toBe(
+      [
+        "declare namespace codemode {",
+        "    namespace github {",
+        "    }",
+        "}"
+      ].join("\n")
+    );
+  });
+
+  it("sanitizes group names in namespaces and type prefixes", () => {
     const result = generateTypesFromJsonSchema({
-      create_issue: {
-        description: "Create a GitHub issue",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            owner: {
-              type: "string" as const,
-              description: "Repository owner"
+      "my-github": {
+        "list-issues": {
+          description: "List issues in a repository",
+          inputSchema: {
+            type: "object",
+            properties: {
+              owner: { type: "string" },
+              repo: { type: "string" }
             },
-            repo: {
-              type: "string" as const,
-              description: "Repository name"
-            },
-            title: {
-              type: "string" as const,
-              description: "Issue title"
-            },
-            body: {
-              type: "string" as const,
-              description: "Issue body"
-            },
-            labels: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Labels to add"
-            }
-          },
-          required: ["owner", "repo", "title"] as string[]
-        }
-      },
-      list_issues: {
-        description: "List issues in a repository",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            owner: { type: "string" as const },
-            repo: { type: "string" as const },
-            state: {
-              type: "string" as const,
-              enum: ["open", "closed", "all"]
-            },
-            per_page: { type: "number" as const }
-          },
-          required: ["owner", "repo"] as string[]
+            required: ["owner", "repo"]
+          }
         }
       }
     });
 
-    expect(result).toBe(
+    expect(result["my-github"]).toContain("type MyGithubListIssuesInput = {");
+    expect(result["my-github"]).toContain("namespace my_github {");
+    expect(result["my-github"]).toContain(
+      "function list_issues(input: MyGithubListIssuesInput): Promise<MyGithubListIssuesOutput>;"
+    );
+  });
+
+  it("generates types from MCP-style tool definitions", () => {
+    const result = generateTypesFromJsonSchema({
+      github: {
+        create_issue: {
+          description: "Create a GitHub issue",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              owner: {
+                type: "string" as const,
+                description: "Repository owner"
+              },
+              repo: {
+                type: "string" as const,
+                description: "Repository name"
+              },
+              title: {
+                type: "string" as const,
+                description: "Issue title"
+              },
+              body: {
+                type: "string" as const,
+                description: "Issue body"
+              },
+              labels: {
+                type: "array" as const,
+                items: { type: "string" as const },
+                description: "Labels to add"
+              }
+            },
+            required: ["owner", "repo", "title"] as string[]
+          }
+        },
+        list_issues: {
+          description: "List issues in a repository",
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              owner: { type: "string" as const },
+              repo: { type: "string" as const },
+              state: {
+                type: "string" as const,
+                enum: ["open", "closed", "all"]
+              },
+              per_page: { type: "number" as const }
+            },
+            required: ["owner", "repo"] as string[]
+          }
+        }
+      }
+    });
+
+    expect(result.github).toBe(
       [
-        "type CreateIssueInput = {",
+        "type GithubCreateIssueInput = {",
         "    /** Repository owner */",
         "    owner: string;",
         "    /** Repository name */",
@@ -329,30 +379,31 @@ describe("generateTypesFromJsonSchema", () => {
         "    /** Labels to add */",
         "    labels?: string[];",
         "}",
-        "type CreateIssueOutput = unknown",
-        "type ListIssuesInput = {",
+        "type GithubCreateIssueOutput = unknown",
+        "type GithubListIssuesInput = {",
         "    owner: string;",
         "    repo: string;",
         '    state?: "open" | "closed" | "all";',
         "    per_page?: number;",
         "}",
-        "type ListIssuesOutput = unknown",
+        "type GithubListIssuesOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Create a GitHub issue",
-        "\t * @param input.owner - Repository owner",
-        "\t * @param input.repo - Repository name",
-        "\t * @param input.title - Issue title",
-        "\t * @param input.body - Issue body",
-        "\t * @param input.labels - Labels to add",
-        "\t */",
-        "\tcreate_issue: (input: CreateIssueInput) => Promise<CreateIssueOutput>;",
-        "",
-        "\t/**",
-        "\t * List issues in a repository",
-        "\t */",
-        "\tlist_issues: (input: ListIssuesInput) => Promise<ListIssuesOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Create a GitHub issue",
+        "         * @param input.owner - Repository owner",
+        "         * @param input.repo - Repository name",
+        "         * @param input.title - Issue title",
+        "         * @param input.body - Issue body",
+        "         * @param input.labels - Labels to add",
+        "         */",
+        "        function create_issue(input: GithubCreateIssueInput): Promise<GithubCreateIssueOutput>;",
+        "        /**",
+        "         * List issues in a repository",
+        "         */",
+        "        function list_issues(input: GithubListIssuesInput): Promise<GithubListIssuesOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );

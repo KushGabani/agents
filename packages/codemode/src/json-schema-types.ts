@@ -309,6 +309,90 @@ function extractJsonSchemaDescriptions(
   return descriptions;
 }
 
+function buildJsDoc(lines: string[], indent: string): string[] {
+  return [
+    `${indent}/**`,
+    ...lines.map((line) => `${indent} * ${line}`),
+    `${indent} */`
+  ];
+}
+
+function generateGroupTypes(
+  groupName: string,
+  tools: JsonSchemaToolDescriptors
+): string {
+  const safeGroupName = sanitizeToolName(groupName);
+  const groupTypePrefix = toPascalCase(safeGroupName);
+  const availableTypes: string[] = [];
+  const availableTools: string[] = [];
+
+  for (const [toolName, tool] of Object.entries(tools)) {
+    const safeToolName = sanitizeToolName(toolName);
+    const typeName = `${groupTypePrefix}${toPascalCase(safeToolName)}`;
+
+    try {
+      const inputType = jsonSchemaToType(tool.inputSchema, `${typeName}Input`);
+      const outputType = tool.outputSchema
+        ? jsonSchemaToType(tool.outputSchema, `${typeName}Output`)
+        : `type ${typeName}Output = unknown`;
+
+      availableTypes.push(inputType.trim(), outputType.trim());
+
+      const paramLines = (() => {
+        try {
+          const paramDescs = extractJsonSchemaDescriptions(tool.inputSchema);
+          return Object.entries(paramDescs).map(
+            ([fieldName, desc]) => `@param input.${fieldName} - ${desc}`
+          );
+        } catch {
+          return [];
+        }
+      })();
+
+      const jsdocLines: string[] = [];
+      if (tool.description?.trim()) {
+        jsdocLines.push(
+          escapeJsDoc(tool.description.trim().replace(/\r?\n/g, " "))
+        );
+      } else {
+        jsdocLines.push(escapeJsDoc(toolName));
+      }
+      for (const paramLine of paramLines) {
+        jsdocLines.push(escapeJsDoc(paramLine.replace(/\r?\n/g, " ")));
+      }
+
+      availableTools.push(
+        ...buildJsDoc(jsdocLines, "        "),
+        `        function ${safeToolName}(input: ${typeName}Input): Promise<${typeName}Output>;`
+      );
+    } catch {
+      availableTypes.push(
+        `type ${typeName}Input = unknown`,
+        `type ${typeName}Output = unknown`
+      );
+      availableTools.push(
+        ...buildJsDoc([escapeJsDoc(toolName)], "        "),
+        `        function ${safeToolName}(input: ${typeName}Input): Promise<${typeName}Output>;`
+      );
+    }
+  }
+
+  const namespaceLines = [
+    "declare namespace codemode {",
+    `    namespace ${safeGroupName} {`,
+    ...availableTools,
+    "    }",
+    "}"
+  ];
+
+  const sections: string[] = [];
+  if (availableTypes.length > 0) {
+    sections.push(availableTypes.join("\n"));
+  }
+  sections.push(namespaceLines.join("\n"));
+  return sections.join("\n\n");
+}
+
 /**
  * A tool descriptor using plain JSON Schema (no Zod or AI SDK dependency).
  */
@@ -323,74 +407,24 @@ export type JsonSchemaToolDescriptors = Record<
   JsonSchemaToolDescriptor
 >;
 
+export type GroupedJsonSchemaToolDescriptors = Record<
+  string,
+  JsonSchemaToolDescriptors
+>;
+
 /**
- * Generate TypeScript type definitions from tool descriptors with JSON Schema.
- * This function has NO dependency on the AI SDK or Zod — it works purely with
- * JSON Schema objects.
- *
- * Use this when you have raw JSON Schema (e.g. from OpenAPI specs, MCP tool
- * definitions, etc.) and don't need the AI SDK.
+ * Generate TypeScript type definitions from grouped tool descriptors with JSON Schema.
+ * Each group result is independently valid `.d.ts` content and can be combined with
+ * other groups via namespace merging.
  */
 export function generateTypesFromJsonSchema(
-  tools: JsonSchemaToolDescriptors
-): string {
-  let availableTools = "";
-  let availableTypes = "";
+  tools: GroupedJsonSchemaToolDescriptors
+): Record<string, string> {
+  const typesByGroup: Record<string, string> = {};
 
-  for (const [toolName, tool] of Object.entries(tools)) {
-    const safeName = sanitizeToolName(toolName);
-    const typeName = toPascalCase(safeName);
-
-    try {
-      const inputType = jsonSchemaToType(tool.inputSchema, `${typeName}Input`);
-
-      const outputType = tool.outputSchema
-        ? jsonSchemaToType(tool.outputSchema, `${typeName}Output`)
-        : `type ${typeName}Output = unknown`;
-
-      availableTypes += `\n${inputType.trim()}`;
-      availableTypes += `\n${outputType.trim()}`;
-
-      const paramLines = (() => {
-        try {
-          const paramDescs = extractJsonSchemaDescriptions(tool.inputSchema);
-          return Object.entries(paramDescs).map(
-            ([fieldName, desc]) => `@param input.${fieldName} - ${desc}`
-          );
-        } catch {
-          return [];
-        }
-      })();
-      const jsdocLines: string[] = [];
-      if (tool.description?.trim()) {
-        jsdocLines.push(
-          escapeJsDoc(tool.description.trim().replace(/\r?\n/g, " "))
-        );
-      } else {
-        jsdocLines.push(escapeJsDoc(toolName));
-      }
-      for (const pd of paramLines) {
-        jsdocLines.push(escapeJsDoc(pd.replace(/\r?\n/g, " ")));
-      }
-
-      const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
-      availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
-      availableTools += "\n";
-    } catch {
-      availableTypes += `\ntype ${typeName}Input = unknown`;
-      availableTypes += `\ntype ${typeName}Output = unknown`;
-
-      availableTools += `\n\t/**\n\t * ${escapeJsDoc(toolName)}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
-      availableTools += "\n";
-    }
+  for (const [groupName, groupTools] of Object.entries(tools)) {
+    typesByGroup[groupName] = generateGroupTypes(groupName, groupTools);
   }
 
-  availableTools = `\ndeclare const codemode: {${availableTools}}`;
-
-  return `
-${availableTypes}
-${availableTools}
-  `.trim();
+  return typesByGroup;
 }
