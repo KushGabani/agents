@@ -6,44 +6,44 @@ A project management chat app where the LLM writes and executes code to orchestr
 
 **Server (`src/server.ts`):**
 
-- `AIChatAgent` with `createCodeTool` -- the LLM gets a single "write code" tool
-- `DynamicWorkerExecutor` -- runs LLM-generated code in isolated Worker sandboxes
-- `NodeServerExecutor` -- alternative executor using a Node.js VM (for local dev)
-- SQLite-backed tools (projects, tasks, sprints, comments) via `SqlStorage`
-- Switchable executor at runtime via HTTP endpoint
+- `AIChatAgent` with `createCodeTool` — the LLM gets a single "write code" tool
+- `DynamicWorkerExecutor` — runs LLM-generated code in isolated Worker sandboxes
+- `NodeServerExecutor` — alternative executor using a Node.js VM for local dev
+- SQLite-backed project management tools grouped under the `pm` namespace
+- MCP tools regrouped by server id, so model code calls `codemode.<serverId>.<tool>(...)`
 
 **Client (`src/client.tsx`):**
 
 - `useAgentChat` for streaming chat with message persistence
 - Collapsible tool cards showing generated code, results, and console output
 - Settings panel to switch between Dynamic Worker and Node Server executors
-- Kumo design system components with dark/light mode
+- MCP server management UI
 
 **Tools (`src/tools.ts`):**
 
-- 10 project management tools: createProject, listProjects, createTask, listTasks, updateTask, deleteTask, createSprint, listSprints, addComment, listComments
-- All backed by SQLite -- data persists across conversations
+- 10 project management tools exposed as `codemode.pm.*`
+- All backed by SQLite — data persists across conversations
 
 ## Running
 
 ```bash
 npm install   # from repo root
 npm run build # from repo root
-npm start     # from this directory -- starts Vite dev server
+npm start     # from this directory -- starts Vite dev server + Node executor helper
 ```
 
 Uses Workers AI (no API key needed) with `@cf/zai-org/glm-4.7-flash`.
 
-To also run the Node executor (optional):
+To run only the Node executor helper:
 
 ```bash
-npm run start:node-executor  # starts Node VM server on port 3001
+npm run start:node-executor
 ```
 
 ## Try it
 
-- "Create a project called Alpha" -- LLM writes code that calls `codemode.createProject()`
-- "Add 3 tasks to Alpha" -- LLM chains multiple tool calls in a single code block
-- "What is 17 + 25?" -- simple calculation via `codemode.addNumbers()`
-- "List all projects and their tasks" -- LLM composes results from multiple tools
-- Open Settings to switch between Dynamic Worker and Node Server executors
+- "Create a project called Alpha" — model writes code that calls `codemode.pm.createProject()`
+- "Add 3 tasks to Alpha" — model chains multiple `codemode.pm.*` calls in one code block
+- "List all projects and their tasks" — model composes results from multiple namespaced tools
+- Connect an MCP server in Settings, then ask the model to use `codemode.<serverId>.<tool>()`
+- Switch between Dynamic Worker and Node Server executors to compare runtime behavior
