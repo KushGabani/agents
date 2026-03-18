@@ -1,14 +1,14 @@
-import { createWorkersAI } from "workers-ai-provider";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import {
-  streamText,
-  convertToModelMessages,
-  pruneMessages,
-  tool,
-  stepCountIs
-} from "ai";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import {
+  convertToModelMessages,
+  pruneMessages,
+  stepCountIs,
+  streamText,
+  tool
+} from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
 const pmTools = {
@@ -56,6 +56,10 @@ const pmTools = {
   })
 };
 
+const groupedTools = {
+  pm: pmTools
+};
+
 export class CodemodeAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 200;
 
@@ -66,14 +70,14 @@ export class CodemodeAgent extends AIChatAgent<Env> {
       loader: this.env.LOADER
     });
 
-    const codemode = createCodeTool({ tools: pmTools, executor });
+    const codemode = createCodeTool({ tools: groupedTools, executor });
 
     const result = streamText({
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant with access to a codemode tool. " +
         "When asked to perform operations, use the codemode tool to write JavaScript code " +
-        "that calls the available functions on the `codemode` object. " +
+        "that calls the available functions on the `codemode` object using `codemode.pm.<tool>(...)`. " +
         "Keep responses short.",
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),

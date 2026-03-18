@@ -5,13 +5,13 @@ import type { Executor } from "@cloudflare/codemode";
 
 export interface CreateExecuteToolOptions {
   /**
-   * The tools available inside the sandboxed code.
-   * These are exposed as `codemode.toolName(args)` in the sandbox.
+   * Grouped tools available inside the sandboxed code.
+   * These are exposed as `codemode.<namespace>.<tool>(args)` in the sandbox.
    *
-   * Typically this is the workspace tools from `createWorkspaceTools()`,
-   * but can include any AI SDK tools with `execute` functions.
+   * Typically this is `{ workspace: createWorkspaceTools(...) }`,
+   * but can include any grouped AI SDK tools with `execute` functions.
    */
-  tools: ToolSet;
+  tools: Record<string, ToolSet>;
 
   /**
    * The executor that runs the generated code.

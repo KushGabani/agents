@@ -1,16 +1,15 @@
-import { Agent, routeAgentRequest, getAgentByName } from "agents";
+import { Agent, getAgentByName, routeAgentRequest } from "agents";
 import {
-  streamText,
   convertToModelMessages,
   stepCountIs,
+  streamText,
   tool,
   type UIMessage
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
-import { createCodeTool } from "../src/ai";
+import { generateTypes, createCodeTool } from "../src/ai";
 import { DynamicWorkerExecutor } from "../src/index";
-import { generateTypes } from "../src/ai";
 
 type Env = {
   AI: Ai;
@@ -63,6 +62,10 @@ const pmTools = {
   })
 };
 
+const groupedTools = {
+  pm: pmTools
+};
+
 export class CodemodeAgent extends Agent<Env> {
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -72,7 +75,7 @@ export class CodemodeAgent extends Agent<Env> {
     }
 
     if (url.pathname.endsWith("/generate-types")) {
-      return Response.json({ types: generateTypes(pmTools) });
+      return Response.json({ types: generateTypes(groupedTools) });
     }
 
     return new Response("Not found", { status: 404 });
@@ -89,18 +92,18 @@ export class CodemodeAgent extends Agent<Env> {
     });
 
     const codemode = createCodeTool({
-      tools: pmTools,
+      tools: groupedTools,
       executor
     });
 
     const result = streamText({
       model,
       system: `You are a helpful assistant with access to a codemode tool.
-When asked to perform operations, use the codemode tool to write JavaScript code that calls the available functions on the \`codemode\` object.
+When asked to perform operations, use the codemode tool to write JavaScript code that calls the available functions on the \`codemode\` object using the namespace \`codemode.pm.<tool>(...)\`.
 Keep responses very short (1-2 sentences max).
-When asked to add numbers, use the addNumbers tool via codemode.
-When asked about weather, use the getWeather tool via codemode.
-When asked about projects, use createProject or listProjects via codemode.`,
+When asked to add numbers, use \`codemode.pm.addNumbers(...)\`.
+When asked about weather, use \`codemode.pm.getWeather(...)\`.
+When asked about projects, use \`codemode.pm.createProject(...)\` or \`codemode.pm.listProjects(...)\`.`,
       messages: await convertToModelMessages(body.messages),
       tools: { codemode },
       stopWhen: stepCountIs(5)
@@ -135,7 +138,7 @@ export default {
     }
 
     if (url.pathname === "/types") {
-      return Response.json({ types: generateTypes(pmTools) });
+      return Response.json({ types: generateTypes(groupedTools) });
     }
 
     return new Response("OK");
