@@ -53,6 +53,21 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js",
       "require": "./dist/mcp.js"
+    },
+    "./normalize": {
+      "types": "./dist/normalize.d.ts",
+      "import": "./dist/normalize.js",
+      "require": "./dist/normalize.js"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "import": "./dist/utils.js",
+      "require": "./dist/utils.js"
+    },
+    "./json-schema-types": {
+      "types": "./dist/json-schema-types.d.ts",
+      "import": "./dist/json-schema-types.js",
+      "require": "./dist/json-schema-types.js"
     }
   },
   "scripts": {
