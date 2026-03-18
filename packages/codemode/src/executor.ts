@@ -15,6 +15,11 @@ export interface ExecuteResult {
   logs?: string[];
 }
 
+export type ToolFns = Record<
+  string,
+  Record<string, (args: unknown) => Promise<unknown>>
+>;
+
 /**
  * An executor runs LLM-generated code in a sandbox, making the provided
  * tool functions callable as `codemode.*` inside the sandbox.
@@ -22,10 +27,7 @@ export interface ExecuteResult {
  * Implementations should never throw — errors are returned in `ExecuteResult.error`.
  */
 export interface Executor {
-  execute(
-    code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult>;
+  execute(code: string, fns: ToolFns): Promise<ExecuteResult>;
 }
 
 // -- ToolDispatcher (RPC target for tool calls from sandboxed Workers) --
@@ -36,18 +38,30 @@ export interface Executor {
  * evaluate() method — no globalOutbound or Fetcher bindings needed.
  */
 export class ToolDispatcher extends RpcTarget {
-  #fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  #fns: ToolFns;
 
-  constructor(fns: Record<string, (...args: unknown[]) => Promise<unknown>>) {
+  constructor(fns: ToolFns) {
     super();
     this.#fns = fns;
   }
 
-  async call(name: string, argsJson: string): Promise<string> {
-    const fn = this.#fns[name];
-    if (!fn) {
-      return JSON.stringify({ error: `Tool "${name}" not found` });
+  async call(
+    namespace: string,
+    name: string,
+    argsJson: string
+  ): Promise<string> {
+    const group = this.#fns[namespace];
+    if (!group) {
+      return JSON.stringify({ error: `Namespace "${namespace}" not found` });
     }
+
+    const fn = group[name];
+    if (!fn) {
+      return JSON.stringify({
+        error: `Tool "${name}" not found in namespace "${namespace}"`
+      });
+    }
+
     try {
       const args = argsJson ? JSON.parse(argsJson) : {};
       const result = await fn(args);
@@ -108,21 +122,17 @@ export class DynamicWorkerExecutor implements Executor {
     this.#modules = safeModules;
   }
 
-  async execute(
-    code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult> {
+  async execute(code: string, fns: ToolFns): Promise<ExecuteResult> {
     const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
 
-    // Sanitize fn keys so raw tool names (e.g. "github.list-issues") become
-    // valid JS identifiers (e.g. "github_list_issues") on the codemode proxy.
-    const sanitizedFns: Record<
-      string,
-      (...args: unknown[]) => Promise<unknown>
-    > = {};
-    for (const [name, fn] of Object.entries(fns)) {
-      sanitizedFns[sanitizeToolName(name)] = fn;
+    const sanitizedFns: ToolFns = {};
+    for (const [namespace, tools] of Object.entries(fns)) {
+      const sanitizedNamespace = sanitizeToolName(namespace);
+      sanitizedFns[sanitizedNamespace] = {};
+      for (const [name, fn] of Object.entries(tools)) {
+        sanitizedFns[sanitizedNamespace][sanitizeToolName(name)] = fn;
+      }
     }
 
     const modulePrefix = [
@@ -135,12 +145,18 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
       "    const codemode = new Proxy({}, {",
-      "      get: (_, toolName) => async (args) => {",
-      "        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
-      "        const data = JSON.parse(resJson);",
-      "        if (data.error) throw new Error(data.error);",
-      "        return data.result;",
-      "      }",
+      "      get: (_, namespace) => new Proxy({}, {",
+      "        get: (_, toolName) => async (args) => {",
+      "          const resJson = await dispatcher.call(",
+      "            String(namespace),",
+      "            String(toolName),",
+      "            JSON.stringify(args ?? {})",
+      "          );",
+      "          const data = JSON.parse(resJson);",
+      "          if (data.error) throw new Error(data.error);",
+      "          return data.result;",
+      "        }",
+      "      })",
       "    });",
       "",
       "    try {",

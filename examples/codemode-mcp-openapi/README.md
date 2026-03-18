@@ -1,13 +1,13 @@
 # codemode-mcp-openapi
 
-Demonstrates how to turn any OpenAPI spec into a pair of MCP tools (`search` + `execute`) using `openApiMcpServer`.
+Demonstrates how to turn one or more OpenAPI specs into a single MCP `code` tool using `openApiMcpServer`.
 
 ## What this shows
 
-`openApiMcpServer` takes a raw OpenAPI spec and creates two tools:
+`openApiMcpServer` takes an `apis` map and creates one `code` tool. Each API becomes a namespace with:
 
-- **`search`** — the LLM queries the spec as a JavaScript object to find endpoints, parameters, and schemas
-- **`execute`** — the LLM calls the API via a host-side `request()` function you provide
+- `codemode.<api>.spec({})` — inspect the fully resolved OpenAPI spec
+- `codemode.<api>.request({...})` — execute host-side API requests
 
 Auth tokens and base URLs live in your `request()` function on the host. The sandbox that runs LLM-generated code has no outbound network access and never sees secrets.
 
@@ -34,38 +34,32 @@ The Worker reads the spec from GitHub on first request and caches it for the lif
 import { openApiMcpServer } from "@cloudflare/codemode/mcp";
 
 const server = openApiMcpServer({
-  spec,
   executor,
-  request: async (opts) => {
-    // Runs on the host — put auth, base URL, and headers here.
-    // The sandbox never sees the token.
-    const url = new URL(`https://api.example.com${opts.path}`);
-    const res = await fetch(url, {
-      method: opts.method,
-      headers: { Authorization: `Bearer ${token}` },
-      body: opts.body ? JSON.stringify(opts.body) : undefined
-    });
-    return res.json();
+  apis: {
+    cloudflare: {
+      spec,
+      description: "Cloudflare API",
+      request: async (opts) => {
+        const url = new URL(`https://api.example.com${opts.path}`);
+        const res = await fetch(url, {
+          method: opts.method,
+          headers: { Authorization: `Bearer ${token}` },
+          body: opts.body ? JSON.stringify(opts.body) : undefined
+        });
+        return res.json();
+      }
+    }
   }
 });
 ```
 
-The LLM first searches the spec:
+The model can inspect the spec and execute requests in one code block:
 
 ```js
 async () => {
-  const spec = await codemode.spec();
-  return Object.entries(spec.paths)
-    .filter(([, item]) => item.get?.tags?.includes("zones"))
-    .map(([path, item]) => ({ path, summary: item.get?.summary }));
-};
-```
-
-Then executes calls:
-
-```js
-async () => {
-  return await codemode.request({ method: "GET", path: "/zones" });
+  const spec = await codemode.cloudflare.spec({});
+  const zonesPath = Object.keys(spec.paths).find((path) => path === "/zones");
+  return await codemode.cloudflare.request({ method: "GET", path: zonesPath });
 };
 ```
 
@@ -81,5 +75,5 @@ async () => {
 
 ## Related
 
-- [codemode-mcp](../codemode-mcp/) — wrapping an existing MCP server instead of an OpenAPI spec
+- [codemode-mcp](../codemode-mcp/) — MCP `code` tool backed by grouped AI SDK tools
 - [`@cloudflare/codemode` docs](../../packages/codemode/README.md)

@@ -1,7 +1,7 @@
 import { asSchema } from "ai";
-import type { ZodType } from "zod";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
+import type { ZodType } from "zod";
 import { sanitizeToolName, toPascalCase, escapeJsDoc } from "./utils";
 import {
   jsonSchemaToTypeString,
@@ -16,6 +16,7 @@ export interface ToolDescriptor {
 }
 
 export type ToolDescriptors = Record<string, ToolDescriptor>;
+export type GroupedToolDescriptors = Record<string, ToolDescriptors | ToolSet>;
 
 /**
  * Check if a value is a Zod schema (has _zod property).
@@ -179,20 +180,26 @@ function safeSchemaToTs(schema: unknown, typeName: string): string {
   }
 }
 
-/**
- * Generate TypeScript type definitions from tool descriptors or an AI SDK ToolSet.
- * These types can be included in tool descriptions to help LLMs write correct code.
- *
- * Requires the `ai` peer dependency. For a version that works with plain JSON Schema
- * objects (no AI SDK), use `generateTypesFromJsonSchema` from the main entry point.
- */
-export function generateTypes(tools: ToolDescriptors | ToolSet): string {
-  let availableTools = "";
-  let availableTypes = "";
+function buildJsDoc(lines: string[], indent: string): string[] {
+  return [
+    `${indent}/**`,
+    ...lines.map((line) => `${indent} * ${line}`),
+    `${indent} */`
+  ];
+}
+
+function generateGroupTypes(
+  groupName: string,
+  tools: ToolDescriptors | ToolSet
+) {
+  const safeGroupName = sanitizeToolName(groupName);
+  const groupTypePrefix = toPascalCase(safeGroupName);
+  const availableTypes: string[] = [];
+  const availableTools: string[] = [];
 
   for (const [toolName, tool] of Object.entries(tools)) {
-    const safeName = sanitizeToolName(toolName);
-    const typeName = toPascalCase(safeName);
+    const safeToolName = sanitizeToolName(toolName);
+    const typeName = `${groupTypePrefix}${toPascalCase(safeToolName)}`;
 
     try {
       const inputSchema =
@@ -202,13 +209,11 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
       const description = tool.description;
 
       const inputType = safeSchemaToTs(inputSchema, `${typeName}Input`);
-
       const outputType = outputSchema
         ? safeSchemaToTs(outputSchema, `${typeName}Output`)
         : `type ${typeName}Output = unknown`;
 
-      availableTypes += `\n${inputType.trim()}`;
-      availableTypes += `\n${outputType.trim()}`;
+      availableTypes.push(inputType.trim(), outputType.trim());
 
       const paramDescs = (() => {
         try {
@@ -223,28 +228,57 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
       } else {
         jsdocLines.push(escapeJsDoc(toolName));
       }
-      for (const pd of paramDescs) {
-        jsdocLines.push(escapeJsDoc(pd.replace(/\r?\n/g, " ")));
+      for (const paramDesc of paramDescs) {
+        jsdocLines.push(escapeJsDoc(paramDesc.replace(/\r?\n/g, " ")));
       }
 
-      const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
-      availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
-      availableTools += "\n";
+      availableTools.push(
+        ...buildJsDoc(jsdocLines, "        "),
+        `        function ${safeToolName}(input: ${typeName}Input): Promise<${typeName}Output>;`
+      );
     } catch {
-      availableTypes += `\ntype ${typeName}Input = unknown`;
-      availableTypes += `\ntype ${typeName}Output = unknown`;
-
-      availableTools += `\n\t/**\n\t * ${escapeJsDoc(toolName)}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
-      availableTools += "\n";
+      availableTypes.push(
+        `type ${typeName}Input = unknown`,
+        `type ${typeName}Output = unknown`
+      );
+      availableTools.push(
+        ...buildJsDoc([escapeJsDoc(toolName)], "        "),
+        `        function ${safeToolName}(input: ${typeName}Input): Promise<${typeName}Output>;`
+      );
     }
   }
 
-  availableTools = `\ndeclare const codemode: {${availableTools}}`;
+  const namespaceLines = [
+    "declare namespace codemode {",
+    `    namespace ${safeGroupName} {`,
+    ...availableTools,
+    "    }",
+    "}"
+  ];
 
-  return `
-${availableTypes}
-${availableTools}
-  `.trim();
+  const sections: string[] = [];
+  if (availableTypes.length > 0) {
+    sections.push(availableTypes.join("\n"));
+  }
+  sections.push(namespaceLines.join("\n"));
+  return sections.join("\n\n");
+}
+
+/**
+ * Generate TypeScript type definitions from grouped tool descriptors or grouped AI SDK ToolSets.
+ * These types can be included in tool descriptions to help LLMs write correct code.
+ *
+ * Requires the `ai` peer dependency. For a version that works with plain JSON Schema
+ * objects (no AI SDK), use `generateTypesFromJsonSchema` from the main entry point.
+ */
+export function generateTypes(
+  tools: GroupedToolDescriptors
+): Record<string, string> {
+  const typesByGroup: Record<string, string> = {};
+
+  for (const [groupName, groupTools] of Object.entries(tools)) {
+    typesByGroup[groupName] = generateGroupTypes(groupName, groupTools);
+  }
+
+  return typesByGroup;
 }

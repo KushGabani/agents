@@ -1,46 +1,39 @@
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { tool } from "ai";
+import { env } from "cloudflare:test";
+import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import { DynamicWorkerExecutor } from "../executor";
 import { codeMcpServer, openApiMcpServer } from "../mcp";
 
-function createUpstreamServer() {
-  const server = new McpServer({
-    name: "test-tools",
-    version: "1.0.0"
-  });
-
-  server.registerTool(
-    "add",
-    {
-      description: "Add two numbers",
-      inputSchema: {
-        a: z.number().describe("First number"),
-        b: z.number().describe("Second number")
-      }
+function createGroupedTools() {
+  return {
+    math: {
+      add: tool({
+        description: "Add two numbers",
+        inputSchema: z.object({
+          a: z.number().describe("First number"),
+          b: z.number().describe("Second number")
+        }),
+        execute: async ({ a, b }) => ({
+          content: [{ type: "text", text: String(a + b) }]
+        })
+      })
     },
-    async ({ a, b }) => ({
-      content: [{ type: "text", text: String(a + b) }]
-    })
-  );
-
-  server.registerTool(
-    "greet",
-    {
-      description: "Generate a greeting",
-      inputSchema: {
-        name: z.string().describe("Name to greet")
-      }
-    },
-    async ({ name }) => ({
-      content: [{ type: "text", text: `Hello, ${name}!` }]
-    })
-  );
-
-  return server;
+    greetings: {
+      greet: tool({
+        description: "Generate a greeting",
+        inputSchema: z.object({
+          name: z.string().describe("Name to greet")
+        }),
+        execute: async ({ name }) => ({
+          content: [{ type: "text", text: `Hello, ${name}!` }]
+        })
+      })
+    }
+  };
 }
 
 async function connectClient(server: McpServer): Promise<Client> {
@@ -58,9 +51,8 @@ function callText(result: Awaited<ReturnType<Client["callTool"]>>): string {
 
 describe("codeMcpServer", () => {
   it("should expose a single code tool", async () => {
-    const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
     const { tools } = await client.listTools();
@@ -69,30 +61,40 @@ describe("codeMcpServer", () => {
     await client.close();
   });
 
-  it("code tool description should declare codemode with add and greet methods", async () => {
-    const upstream = createUpstreamServer();
+  it("code tool description should declare grouped codemode namespaces", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
     const { tools } = await client.listTools();
+    const description = tools[0].description ?? "";
 
-    expect(tools[0].description).toMatchSnapshot();
+    expect(description).toContain("declare namespace codemode");
+    expect(description).toContain("namespace math");
+    expect(description).toContain("namespace greetings");
+    expect(description).toContain(
+      "function add(input: MathAddInput): Promise<MathAddOutput>;"
+    );
+    expect(description).toContain(
+      "function greet(input: GreetingsGreetInput): Promise<GreetingsGreetOutput>;"
+    );
+    expect(description).toContain(
+      "Example: async () => { const r = await codemode.math.add({}); return r; }"
+    );
 
     await client.close();
   });
 
-  it("code tool should call upstream add(10, 32) and return 42", async () => {
-    const upstream = createUpstreamServer();
+  it("code tool should call grouped add(10, 32) and return 42", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
       name: "code",
       arguments: {
         code: `async () => {
-          const r = await codemode.add({ a: 10, b: 32 });
+          const r = await codemode.math.add({ a: 10, b: 32 });
           return r;
         }`
       }
@@ -103,18 +105,17 @@ describe("codeMcpServer", () => {
     await client.close();
   });
 
-  it("code tool should chain add then greet", async () => {
-    const upstream = createUpstreamServer();
+  it("code tool should chain across namespaces", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
       name: "code",
       arguments: {
         code: `async () => {
-          const sum = await codemode.add({ a: 5, b: 3 });
-          const greeting = await codemode.greet({ name: "Result is " + sum.content[0].text });
+          const sum = await codemode.math.add({ a: 5, b: 3 });
+          const greeting = await codemode.greetings.greet({ name: "Result is " + sum.content[0].text });
           return greeting;
         }`
       }
@@ -128,9 +129,8 @@ describe("codeMcpServer", () => {
   });
 
   it("code tool should return error on throw", async () => {
-    const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
@@ -145,56 +145,30 @@ describe("codeMcpServer", () => {
     await client.close();
   });
 
-  it("code tool should handle undefined return value", async () => {
-    const upstream = createUpstreamServer();
+  it("code tool should return namespace/tool not found errors", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const wrapped = codeMcpServer({ tools: createGroupedTools(), executor });
     const client = await connectClient(wrapped);
 
-    const result = await client.callTool({
+    const missingNamespace = await client.callTool({
       name: "code",
       arguments: {
-        code: "async () => { return undefined; }"
+        code: "async () => await codemode.missing.tool({})"
       }
     });
+    expect(callText(missingNamespace)).toBe(
+      'Error: Namespace "missing" not found'
+    );
 
-    expect(callText(result)).toBe("undefined");
-
-    await client.close();
-  });
-
-  it("code tool should handle null return value", async () => {
-    const upstream = createUpstreamServer();
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
-    const client = await connectClient(wrapped);
-
-    const result = await client.callTool({
+    const missingTool = await client.callTool({
       name: "code",
       arguments: {
-        code: "async () => { return null; }"
+        code: "async () => await codemode.math.nonexistent({})"
       }
     });
-
-    expect(callText(result)).toBe("null");
-
-    await client.close();
-  });
-
-  it("code tool should handle non-existent upstream tool", async () => {
-    const upstream = createUpstreamServer();
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer({ server: upstream, executor });
-    const client = await connectClient(wrapped);
-
-    const result = await client.callTool({
-      name: "code",
-      arguments: {
-        code: "async () => { return await codemode.nonexistent({}); }"
-      }
-    });
-
-    expect(callText(result)).toBe('Error: Tool "nonexistent" not found');
+    expect(callText(missingTool)).toBe(
+      'Error: Tool "nonexistent" not found in namespace "math"'
+    );
 
     await client.close();
   });
@@ -203,6 +177,10 @@ describe("codeMcpServer", () => {
 describe("openApiMcpServer", () => {
   const sampleSpec = {
     openapi: "3.0.0",
+    info: {
+      title: "Users API",
+      version: "1.0.0"
+    },
     paths: {
       "/users": {
         get: {
@@ -215,146 +193,121 @@ describe("openApiMcpServer", () => {
               schema: { type: "integer" }
             }
           ]
-        },
-        post: {
-          summary: "Create user",
-          tags: ["users"],
-          requestBody: {
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  properties: { name: { type: "string" } }
-                }
-              }
-            }
-          }
-        }
-      },
-      "/users/{id}": {
-        get: {
-          summary: "Get user by ID",
-          tags: ["users"],
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string" }
-            }
-          ]
         }
       }
     }
   };
 
-  it("should expose search and execute tools", async () => {
+  const billingSpec = {
+    openapi: "3.0.0",
+    info: {
+      title: "Billing API",
+      version: "1.0.0"
+    },
+    paths: {
+      "/invoices": {
+        get: {
+          summary: "List invoices",
+          tags: ["billing"]
+        }
+      }
+    }
+  };
+
+  it("should expose a single code tool", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => ({})
+      apis: {
+        users: { spec: sampleSpec, request: async () => ({}) },
+        billing: { spec: billingSpec, request: async () => ({}) }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["execute", "search"]);
+    expect(tools.map((t) => t.name)).toEqual(["code"]);
 
     await client.close();
   });
 
-  it("search tool description should match snapshot", async () => {
+  it("code tool description should include shared interfaces and all API namespaces", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => ({})
+      apis: {
+        users: {
+          spec: sampleSpec,
+          request: async () => ({}),
+          description: "Users API"
+        },
+        billing: {
+          spec: billingSpec,
+          request: async () => ({})
+        }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const { tools } = await client.listTools();
-    const searchTool = tools.find((t) => t.name === "search");
-    expect(searchTool!.description).toMatchSnapshot();
+    const description = tools[0].description ?? "";
+
+    expect(description).toContain("interface OpenApiSpec {");
+    expect(description).toContain("interface RequestOptions {");
+    expect(description).toContain("namespace users");
+    expect(description).toContain("namespace billing");
+    expect(description).toContain(
+      "function spec(input: UsersSpecInput): Promise<UsersSpecOutput>;"
+    );
+    expect(description).toContain(
+      "function request(input: UsersRequestInput): Promise<UsersRequestOutput>;"
+    );
 
     await client.close();
   });
 
-  it("execute tool description should match snapshot", async () => {
+  it("code tool should list spec paths via codemode.users.spec()", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => ({})
-    });
-    const client = await connectClient(server);
-
-    const { tools } = await client.listTools();
-    const executeTool = tools.find((t) => t.name === "execute");
-    expect(executeTool!.description).toMatchSnapshot();
-
-    await client.close();
-  });
-
-  it("search tool should list spec paths via codemode.spec()", async () => {
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => ({})
+      apis: {
+        users: { spec: sampleSpec, request: async () => ({}) }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const result = await client.callTool({
-      name: "search",
+      name: "code",
       arguments: {
-        code: "async () => { const spec = await codemode.spec(); return Object.keys(spec.paths); }"
+        code: "async () => { const spec = await codemode.users.spec({}); return Object.keys(spec.paths); }"
       }
     });
 
-    expect(JSON.parse(callText(result))).toEqual(["/users", "/users/{id}"]);
+    expect(JSON.parse(callText(result))).toEqual(["/users"]);
 
     await client.close();
   });
 
-  it("search tool should return first operation summary", async () => {
+  it("code tool should proxy codemode.users.request() to host-side function", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const requestSpy = vi.fn(async (opts) => ({
+      status: 200,
+      method: opts.method,
+      path: opts.path,
+      data: [{ id: 1, name: "Alice" }]
+    }));
     const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => ({})
+      apis: {
+        users: { spec: sampleSpec, request: requestSpy }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const result = await client.callTool({
-      name: "search",
+      name: "code",
       arguments: {
-        code: "async () => { const spec = await codemode.spec(); return spec.paths['/users'].get.summary; }"
-      }
-    });
-
-    expect(callText(result)).toBe("List users");
-
-    await client.close();
-  });
-
-  it("execute tool should proxy codemode.request() to host-side function", async () => {
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async (opts) => ({
-        status: 200,
-        method: opts.method,
-        path: opts.path,
-        data: [{ id: 1, name: "Alice" }]
-      })
-    });
-    const client = await connectClient(server);
-
-    const result = await client.callTool({
-      name: "execute",
-      arguments: {
-        code: 'async () => await codemode.request({ method: "GET", path: "/users" })'
+        code: 'async () => await codemode.users.request({ method: "GET", path: "/users" })'
       }
     });
 
@@ -364,36 +317,57 @@ describe("openApiMcpServer", () => {
       path: "/users",
       data: [{ id: 1, name: "Alice" }]
     });
+    expect(requestSpy).toHaveBeenCalledWith({ method: "GET", path: "/users" });
 
     await client.close();
   });
 
-  it("execute tool should return error when request throws", async () => {
+  it("code tool should allow mixing spec + request across APIs", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
-      spec: sampleSpec,
-      executor,
-      request: async () => {
-        throw new Error("unauthorized");
-      }
+      apis: {
+        users: {
+          spec: sampleSpec,
+          request: async (opts) => ({ api: "users", path: opts.path })
+        },
+        billing: {
+          spec: billingSpec,
+          request: async (opts) => ({ api: "billing", path: opts.path })
+        }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const result = await client.callTool({
-      name: "execute",
+      name: "code",
       arguments: {
-        code: 'async () => await codemode.request({ method: "GET", path: "/secret" })'
+        code: `async () => {
+          const userSpec = await codemode.users.spec({});
+          const billingSpec = await codemode.billing.spec({});
+          return {
+            usersPath: Object.keys(userSpec.paths)[0],
+            billing: await codemode.billing.request({ method: "GET", path: Object.keys(billingSpec.paths)[0] })
+          };
+        }`
       }
     });
 
-    expect(callText(result)).toBe("Error: unauthorized");
+    expect(JSON.parse(callText(result))).toEqual({
+      usersPath: "/users",
+      billing: { api: "billing", path: "/invoices" }
+    });
 
     await client.close();
   });
 
-  it("should resolve $refs before injecting spec", async () => {
+  it("should resolve $refs before injecting specs", async () => {
     const specWithRefs = {
       openapi: "3.0.0",
+      info: {
+        title: "Items API",
+        version: "1.0.0"
+      },
       paths: {
         "/items": {
           get: {
@@ -422,16 +396,17 @@ describe("openApiMcpServer", () => {
 
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
-      spec: specWithRefs,
-      executor,
-      request: async () => ({})
+      apis: {
+        items: { spec: specWithRefs, request: async () => ({}) }
+      },
+      executor
     });
     const client = await connectClient(server);
 
     const result = await client.callTool({
-      name: "search",
+      name: "code",
       arguments: {
-        code: "async () => { const spec = await codemode.spec(); return spec.paths['/items'].get.responses['200'].content['application/json'].schema; }"
+        code: "async () => { const spec = await codemode.items.spec({}); return spec.paths['/items'].get.responses['200'].content['application/json'].schema; }"
       }
     });
 

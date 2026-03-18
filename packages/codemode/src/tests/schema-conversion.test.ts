@@ -9,10 +9,15 @@ import { describe, it, expect } from "vitest";
 import { generateTypes } from "../tool-types";
 import type { ToolSet } from "ai";
 
-// Helper: generateTypes accepts ToolDescriptors | ToolSet but jsonSchema() tools
-// don't satisfy ToolDescriptors (Zod-typed). Cast via ToolSet for test convenience.
-function genTypes(tools: Record<string, unknown>): string {
-  return generateTypes(tools as unknown as ToolSet);
+// Helper: generateTypes accepts grouped tool records. jsonSchema() tools don't
+// satisfy ToolDescriptors (Zod-typed), so cast via ToolSet for test convenience.
+function genTypes(
+  tools: Record<string, unknown>,
+  groupName = "github"
+): string {
+  return generateTypes({
+    [groupName]: tools as unknown as ToolSet
+  })[groupName];
 }
 
 /**
@@ -76,9 +81,9 @@ describe("basic types", () => {
       zod: z.object({ id: z.string() })
     },
     (result) => {
-      expect(result).toContain("type GetUserInput");
+      expect(result).toContain("type GithubGetUserInput");
       expect(result).toContain("id: string;");
-      expect(result).toContain("type GetUserOutput = unknown");
+      expect(result).toContain("type GithubGetUserOutput = unknown");
     },
     { description: "Get a user" }
   );
@@ -460,7 +465,7 @@ describe("output schemas", () => {
       zod: z.object({ city: z.string().optional() })
     },
     (result) => {
-      expect(result).toContain("type GetWeatherOutput");
+      expect(result).toContain("type GithubGetWeatherOutput");
       expect(result).not.toContain("GetWeatherOutput = unknown");
       expect(result).toContain("temperature?: number;");
       expect(result).toContain("conditions?: string;");
@@ -502,15 +507,15 @@ describe("output schemas", () => {
     },
     (result) => {
       // Input
-      expect(result).toContain("type GetWeatherInput");
+      expect(result).toContain("type GithubGetWeatherInput");
       expect(result).toContain("city: string");
       expect(result).toContain("units?:");
       expect(result).toContain('"celsius"');
       expect(result).toContain('"fahrenheit"');
 
       // Output
-      expect(result).toContain("type GetWeatherOutput");
-      expect(result).not.toContain("GetWeatherOutput = unknown");
+      expect(result).toContain("type GithubGetWeatherOutput");
+      expect(result).not.toContain("GithubGetWeatherOutput = unknown");
       expect(result).toContain("temperature");
       expect(result).toContain("conditions");
       expect(result).toContain("forecast?:");
@@ -710,7 +715,7 @@ describe("circular schemas", () => {
     // Should not throw
     const result = genTypes(tools);
 
-    expect(result).toContain("type TestInput");
+    expect(result).toContain("type GithubTestInput");
   });
 
   it("handles deeply nested schemas hitting depth limit", () => {
@@ -733,7 +738,7 @@ describe("circular schemas", () => {
     // Should not throw
     const result = genTypes(tools);
 
-    expect(result).toContain("type DeepInput");
+    expect(result).toContain("type GithubDeepInput");
     // At some point it should hit the depth limit and emit `unknown`
     expect(result).toContain("unknown");
   });
@@ -1092,7 +1097,7 @@ describe("additionalProperties", () => {
 
     const result = genTypes(tools);
 
-    expect(result).toContain("type TestInput = {}");
+    expect(result).toContain("type GithubTestInput = {}");
     expect(result).not.toContain("Record<string, unknown>");
   });
 
@@ -1189,12 +1194,13 @@ describe("codemode declaration", () => {
 
     const result = genTypes(tools);
 
-    expect(result).toContain("declare const codemode: {");
+    expect(result).toContain("declare namespace codemode {");
+    expect(result).toContain("namespace github {");
     expect(result).toContain(
-      "tool1: (input: Tool1Input) => Promise<Tool1Output>;"
+      "function tool1(input: GithubTool1Input): Promise<GithubTool1Output>;"
     );
     expect(result).toContain(
-      "tool2: (input: Tool2Input) => Promise<Tool2Output>;"
+      "function tool2(input: GithubTool2Input): Promise<GithubTool2Output>;"
     );
   });
 
@@ -1212,12 +1218,13 @@ describe("codemode declaration", () => {
 
     const result = genTypes(tools);
 
-    expect(result).toContain("declare const codemode: {");
+    expect(result).toContain("declare namespace codemode {");
+    expect(result).toContain("namespace github {");
     expect(result).toContain(
-      "tool1: (input: Tool1Input) => Promise<Tool1Output>;"
+      "function tool1(input: GithubTool1Input): Promise<GithubTool1Output>;"
     );
     expect(result).toContain(
-      "tool2: (input: Tool2Input) => Promise<Tool2Output>;"
+      "function tool2(input: GithubTool2Input): Promise<GithubTool2Output>;"
     );
   });
 
@@ -1232,7 +1239,9 @@ describe("codemode declaration", () => {
       zod: z.object({ id: z.string().optional() })
     },
     (result) => {
-      expect(result).toContain("get_user: (input: GetUserInput)");
+      expect(result).toContain(
+        "function get_user(input: GithubGetUserInput): Promise<GithubGetUserOutput>;"
+      );
     },
     { description: "Get user" }
   );

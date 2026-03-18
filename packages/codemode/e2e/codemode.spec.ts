@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 /**
  * E2E tests for @cloudflare/codemode with a real AI binding.
@@ -33,35 +33,35 @@ async function runChat(
 }
 
 test.describe("codemode e2e (Workers AI)", () => {
+  test.skip(
+    !process.env.CLOUDFLARE_API_TOKEN,
+    "Requires CLOUDFLARE_API_TOKEN to run wrangler dev with Workers AI"
+  );
   test.setTimeout(45_000);
 
-  test("LLM generates and executes code that calls addNumbers tool", async ({
+  test("LLM generates and executes code that calls pm.addNumbers", async ({
     request,
     baseURL
   }) => {
     const response = await runChat(
       request,
       baseURL!,
-      "What is 17 + 25? Use the codemode tool with the addNumbers function to calculate this."
+      "What is 17 + 25? Use the codemode tool with codemode.pm.addNumbers to calculate this."
     );
 
-    // The response stream should contain the answer 42 somewhere
-    // (either in the tool result or the LLM's text response)
     expect(response).toContain("42");
   });
 
-  test("LLM generates and executes code that calls getWeather tool", async ({
+  test("LLM generates and executes code that calls pm.getWeather", async ({
     request,
     baseURL
   }) => {
     const response = await runChat(
       request,
       baseURL!,
-      "What is the weather in London? Use the codemode tool with the getWeather function."
+      "What is the weather in London? Use the codemode tool with codemode.pm.getWeather."
     );
 
-    // The getWeather tool returns { city: "London", temperature: 22, condition: "Sunny" }
-    // The LLM should mention London or the weather data in its response
     const lower = response.toLowerCase();
     expect(
       lower.includes("london") ||
@@ -70,32 +70,30 @@ test.describe("codemode e2e (Workers AI)", () => {
     ).toBe(true);
   });
 
-  test("LLM generates and executes code that calls listProjects tool", async ({
+  test("LLM generates and executes code that calls pm.listProjects", async ({
     request,
     baseURL
   }) => {
     const response = await runChat(
       request,
       baseURL!,
-      "List all projects using the codemode tool with the listProjects function."
+      "List all projects using the codemode tool with codemode.pm.listProjects."
     );
 
-    // listProjects returns Alpha and Beta
     const lower = response.toLowerCase();
     expect(lower.includes("alpha") || lower.includes("beta")).toBe(true);
   });
 
-  test("LLM generates code with multiple tool calls", async ({
+  test("LLM generates code with multiple namespaced tool calls", async ({
     request,
     baseURL
   }) => {
     const response = await runChat(
       request,
       baseURL!,
-      "Using the codemode tool, first get the weather in Paris, then add the numbers 10 and 5. Return both results."
+      "Using the codemode tool, first get the weather in Paris with codemode.pm.getWeather, then add the numbers 10 and 5 with codemode.pm.addNumbers. Return both results."
     );
 
-    // Should contain evidence of both tool calls completing
     const lower = response.toLowerCase();
     expect(
       lower.includes("paris") ||
@@ -105,7 +103,7 @@ test.describe("codemode e2e (Workers AI)", () => {
     ).toBe(true);
   });
 
-  test("generateTypes returns valid type definitions", async ({
+  test("generateTypes returns grouped type definitions", async ({
     request,
     baseURL
   }) => {
@@ -113,12 +111,13 @@ test.describe("codemode e2e (Workers AI)", () => {
     expect(res.ok()).toBe(true);
 
     const data = await res.json();
-    const types = data.types as string;
+    const types = data.types as Record<string, string>;
 
-    expect(types).toContain("declare const codemode");
-    expect(types).toContain("addNumbers");
-    expect(types).toContain("getWeather");
-    expect(types).toContain("createProject");
-    expect(types).toContain("listProjects");
+    expect(types.pm).toContain("declare namespace codemode");
+    expect(types.pm).toContain("namespace pm");
+    expect(types.pm).toContain("addNumbers");
+    expect(types.pm).toContain("getWeather");
+    expect(types.pm).toContain("createProject");
+    expect(types.pm).toContain("listProjects");
   });
 });

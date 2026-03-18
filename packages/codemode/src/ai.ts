@@ -1,6 +1,7 @@
 export { createCodeTool, type CreateCodeToolOptions } from "./tool";
 export {
   generateTypes,
+  type GroupedToolDescriptors,
   type ToolDescriptor,
   type ToolDescriptors
 } from "./tool-types";

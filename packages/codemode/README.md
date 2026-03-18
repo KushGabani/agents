@@ -9,18 +9,21 @@ Code Mode generates TypeScript type definitions from your tools for LLM context,
 ## Installation
 
 ```sh
-# Full AI SDK integration
-npm install @cloudflare/codemode agents ai zod
-
-# Utilities only (no ai/zod peer deps needed)
+# Core runtime + utilities only
 npm install @cloudflare/codemode
+
+# AI SDK integration
+npm install @cloudflare/codemode ai zod
+
+# MCP integration
+npm install @cloudflare/codemode @modelcontextprotocol/sdk ai zod
 ```
 
-The main entry point (`@cloudflare/codemode`) has **no peer dependency on `ai` or `zod`**. The `ai` and `zod` packages are only required when importing from `@cloudflare/codemode/ai`.
+The main entry point (`@cloudflare/codemode`) has no direct AI SDK surface. The AI SDK integration lives in `@cloudflare/codemode/ai`. The MCP helpers live in `@cloudflare/codemode/mcp`.
 
 ## Quick Start
 
-`createCodeTool` takes your tools and an executor, and returns a single AI SDK tool that lets the LLM write code instead of making individual tool calls.
+`createCodeTool` takes **grouped tools** and an executor, and returns a single AI SDK tool that lets the LLM write code instead of making individual tool calls.
 
 ```ts
 import { createCodeTool } from "@cloudflare/codemode/ai";
@@ -28,33 +31,33 @@ import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { streamText, tool } from "ai";
 import { z } from "zod";
 
-// 1. Define your tools using the AI SDK tool() wrapper
 const tools = {
-  getWeather: tool({
-    description: "Get weather for a location",
-    inputSchema: z.object({ location: z.string() }),
-    execute: async ({ location }) => `Weather in ${location}: 72°F, sunny`
-  }),
-  sendEmail: tool({
-    description: "Send an email",
-    inputSchema: z.object({
-      to: z.string(),
-      subject: z.string(),
-      body: z.string()
-    }),
-    execute: async ({ to, subject, body }) => `Email sent to ${to}`
-  })
+  weather: {
+    getWeather: tool({
+      description: "Get weather for a location",
+      inputSchema: z.object({ location: z.string() }),
+      execute: async ({ location }) => `Weather in ${location}: 72°F, sunny`
+    })
+  },
+  notifications: {
+    sendEmail: tool({
+      description: "Send an email",
+      inputSchema: z.object({
+        to: z.string(),
+        subject: z.string(),
+        body: z.string()
+      }),
+      execute: async ({ to }) => `Email sent to ${to}`
+    })
+  }
 };
 
-// 2. Create an executor (runs code in an isolated Worker)
 const executor = new DynamicWorkerExecutor({
   loader: env.LOADER
 });
 
-// 3. Create the codemode tool
 const codemode = createCodeTool({ tools, executor });
 
-// 4. Use it with streamText — the LLM writes code that calls your tools
 const result = streamText({
   model,
   system: "You are a helpful assistant.",
@@ -67,9 +70,11 @@ The LLM sees a typed `codemode` object and writes code like:
 
 ```js
 async () => {
-  const weather = await codemode.getWeather({ location: "London" });
+  const weather = await codemode.weather.getWeather({
+    location: "London"
+  });
   if (weather.includes("sunny")) {
-    await codemode.sendEmail({
+    await codemode.notifications.sendEmail({
       to: "team@example.com",
       subject: "Nice day!",
       body: `It's ${weather}`
@@ -84,21 +89,21 @@ async () => {
 ### How it works
 
 ```
-┌─────────────┐        ┌──────────────────────────────────────┐
-│             │        │  Dynamic Worker (isolated sandbox)   │
-│  Host       │  RPC   │                                      │
-│  Worker     │◄──────►│  LLM-generated code runs here        │
-│             │        │  codemode.myTool() → dispatcher.call()│
-│  ToolDispatcher      │                                      │
-│  holds tool fns      │  fetch() blocked by default          │
-└─────────────┘        └──────────────────────────────────────┘
+┌─────────────┐        ┌────────────────────────────────────────┐
+│             │        │  Dynamic Worker (isolated sandbox)     │
+│  Host       │  RPC   │                                        │
+│  Worker     │◄──────►│  LLM-generated code runs here          │
+│             │        │  codemode.group.tool() → dispatcher    │
+│  ToolDispatcher      │                                        │
+│  holds tool fns      │  fetch() blocked by default            │
+└─────────────┘        └────────────────────────────────────────┘
 ```
 
-1. `createCodeTool` generates TypeScript type definitions from your tools and builds a description the LLM can read
-2. The LLM writes an async arrow function that calls `codemode.toolName(args)`
+1. `createCodeTool` generates grouped TypeScript type definitions from your tools
+2. The LLM writes an async arrow function that calls `codemode.<group>.<tool>(args)`
 3. Code is normalized via AST parsing (acorn) and sent to the executor
 4. `DynamicWorkerExecutor` spins up an isolated Worker via `WorkerLoader`
-5. Inside the sandbox, a `Proxy` intercepts `codemode.*` calls and routes them back to the host via Workers RPC (`ToolDispatcher extends RpcTarget`)
+5. Inside the sandbox, a two-level `Proxy` intercepts namespace + tool calls and routes them back to the host via Workers RPC (`ToolDispatcher extends RpcTarget`)
 6. Console output is captured and returned alongside the result
 
 ### Network isolation
@@ -120,11 +125,13 @@ const executor = new DynamicWorkerExecutor({
 The `Executor` interface is deliberately minimal — implement it to run code in any sandbox:
 
 ```ts
+type ToolFns = Record<
+  string,
+  Record<string, (args: unknown) => Promise<unknown>>
+>;
+
 interface Executor {
-  execute(
-    code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult>;
+  execute(code: string, fns: ToolFns): Promise<ExecuteResult>;
 }
 
 interface ExecuteResult {
@@ -135,21 +142,6 @@ interface ExecuteResult {
 ```
 
 `DynamicWorkerExecutor` is the Cloudflare Workers implementation, but you can build your own for Node VM, QuickJS, containers, or anything else.
-
-```ts
-// Example: a simple Node VM executor
-class NodeVMExecutor implements Executor {
-  async execute(code, fns): Promise<ExecuteResult> {
-    try {
-      const fn = new AsyncFunction("codemode", `return await (${code})()`);
-      const result = await fn(fns);
-      return { result };
-    } catch (err) {
-      return { result: undefined, error: err.message };
-    }
-  }
-}
-```
 
 ## Configuration
 
@@ -163,7 +155,7 @@ class NodeVMExecutor implements Executor {
 }
 ```
 
-### DynamicWorkerExecutor options
+### `DynamicWorkerExecutor` options
 
 | Option           | Type              | Default  | Description                                                  |
 | ---------------- | ----------------- | -------- | ------------------------------------------------------------ |
@@ -171,23 +163,21 @@ class NodeVMExecutor implements Executor {
 | `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
 | `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 
-### createCodeTool options
+### `createCodeTool` options
 
-| Option        | Type                         | Default        | Description                                            |
-| ------------- | ---------------------------- | -------------- | ------------------------------------------------------ |
-| `tools`       | `ToolSet \| ToolDescriptors` | required       | Your tools (AI SDK `tool()` or raw descriptors)        |
-| `executor`    | `Executor`                   | required       | Where to run the generated code                        |
-| `description` | `string`                     | auto-generated | Custom tool description. Use `{{types}}` for type defs |
+| Option        | Type                      | Default        | Description                                                         |
+| ------------- | ------------------------- | -------------- | ------------------------------------------------------------------- |
+| `tools`       | `Record<string, ToolSet>` | required       | Grouped tools by namespace                                          |
+| `executor`    | `Executor`                | required       | Where to run the generated code                                     |
+| `description` | `string`                  | auto-generated | Custom tool description. Use `{{types}}` for injected grouped types |
 
 ## Agent Integration
-
-The user sends a message, the agent passes it to an LLM with the codemode tool, and the LLM writes and executes code to fulfill the request.
 
 ```ts
 import { Agent } from "agents";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { streamText, convertToModelMessages, stepCountIs } from "ai";
+import { convertToModelMessages, stepCountIs, streamText } from "ai";
 
 export class MyAgent extends Agent<Env, State> {
   async onChatMessage() {
@@ -196,7 +186,10 @@ export class MyAgent extends Agent<Env, State> {
     });
 
     const codemode = createCodeTool({
-      tools: myTools,
+      tools: {
+        github: this.githubTools,
+        gmail: this.gmailTools
+      },
       executor
     });
 
@@ -208,30 +201,106 @@ export class MyAgent extends Agent<Env, State> {
       stopWhen: stepCountIs(10)
     });
 
-    // Stream response back to client...
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-### With MCP tools
+### With MCP tools in your own agent
 
-MCP tools work the same way — just merge them into the tool set:
+If you already have MCP tools from `this.mcp.getAITools()`, regroup them by server ID before passing them to `createCodeTool()`.
 
 ```ts
+const groupedTools = {
+  pm: this.localTools,
+  [serverId]: {
+    [toolName]: mcpAiTool
+  }
+};
+
 const codemode = createCodeTool({
-  tools: {
-    ...myTools,
-    ...this.mcp.getAITools()
-  },
+  tools: groupedTools,
   executor
 });
+```
+
+## MCP Helpers
+
+### `codeMcpServer({ tools, executor })`
+
+Expose a single MCP `code` tool backed by grouped AI SDK tools.
+
+```ts
+import { tool } from "ai";
+import { z } from "zod";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { codeMcpServer } from "@cloudflare/codemode/mcp";
+
+const server = codeMcpServer({
+  executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
+  tools: {
+    github: {
+      listIssues: tool({
+        description: "List issues",
+        inputSchema: z.object({ repo: z.string() }),
+        execute: async ({ repo }) => ({ repo, issues: [] })
+      })
+    }
+  }
+});
+```
+
+The model writes code like:
+
+```js
+async () => {
+  return await codemode.github.listIssues({ repo: "cloudflare/agents" });
+};
+```
+
+### `openApiMcpServer({ apis, executor })`
+
+Expose a single MCP `code` tool for one or more OpenAPI specs. Each API becomes a namespace with `spec()` and `request(...)`.
+
+```ts
+import { openApiMcpServer } from "@cloudflare/codemode/mcp";
+
+const server = openApiMcpServer({
+  executor,
+  apis: {
+    cloudflare: {
+      spec,
+      description: "Cloudflare API",
+      request: async (opts) => {
+        const url = new URL(`https://api.cloudflare.com/client/v4${opts.path}`);
+        return fetch(url, {
+          method: opts.method,
+          headers: { Authorization: `Bearer ${token}` }
+        }).then((res) => res.json());
+      }
+    }
+  }
+});
+```
+
+The model writes code like:
+
+```js
+async () => {
+  const spec = await codemode.cloudflare.spec({});
+  const path = Object.keys(spec.paths)[0];
+  return await codemode.cloudflare.request({
+    method: "GET",
+    path
+  });
+};
 ```
 
 ## Utilities
 
 ### `sanitizeToolName(name)`
 
-Converts tool names into valid JavaScript identifiers. Handles hyphens, dots, digits, reserved words. Called automatically by `DynamicWorkerExecutor` on `fns` keys — you only need this for custom use cases.
+Converts group and tool names into valid JavaScript identifiers. Handles hyphens, dots, digits, reserved words.
 
 ```ts
 import { sanitizeToolName } from "@cloudflare/codemode";
@@ -243,7 +312,7 @@ sanitizeToolName("delete"); // "delete_"
 
 ### `normalizeCode(code)`
 
-Normalizes LLM-generated code into a valid async arrow function. Strips markdown code fences, handles various function formats. Called automatically by `DynamicWorkerExecutor` — you only need this for custom use cases.
+Normalizes LLM-generated code into a valid async arrow function. Strips markdown fences and handles various function formats. Called automatically by `createCodeTool` and `DynamicWorkerExecutor`.
 
 ````ts
 import { normalizeCode } from "@cloudflare/codemode";
@@ -254,54 +323,66 @@ normalizeCode("```js\nconst x = 1;\nx\n```");
 
 ### `generateTypesFromJsonSchema(tools)`
 
-Generates TypeScript type definitions from tool descriptors with plain JSON Schema. No AI SDK or Zod dependency required.
+Generates grouped TypeScript type definitions from plain JSON Schema descriptors.
 
 ```ts
 import { generateTypesFromJsonSchema } from "@cloudflare/codemode";
 
 const types = generateTypesFromJsonSchema({
-  getWeather: {
-    description: "Get weather for a city",
-    inputSchema: {
-      type: "object",
-      properties: {
-        city: { type: "string", description: "City name" }
-      },
-      required: ["city"]
+  github: {
+    listIssues: {
+      description: "List issues",
+      inputSchema: {
+        type: "object",
+        properties: {
+          repo: { type: "string", description: "Repository name" }
+        },
+        required: ["repo"]
+      }
     }
   }
 });
-// Returns TypeScript declarations like:
-// type GetWeatherInput = { city: string }
-// declare const codemode: { getWeather: (input: GetWeatherInput) => Promise<...>; }
+
+console.log(types.github);
+// type GithubListIssuesInput = { ... }
+// declare namespace codemode { namespace github { ... } }
 ```
 
 ### `generateTypes(tools)` (AI SDK)
 
-Generates TypeScript type definitions from AI SDK tools or Zod-based tool descriptors. Requires `ai` and `zod` peer dependencies.
+Generates grouped TypeScript type definitions from grouped AI SDK tools or grouped Zod tool descriptors.
 
 ```ts
 import { generateTypes } from "@cloudflare/codemode/ai";
 
-const types = generateTypes(myAiSdkTools);
+const types = generateTypes({
+  github: myGithubTools,
+  gmail: myGmailTools
+});
+
+console.log(types.github);
+console.log(types.gmail);
 ```
 
 ## Module Structure
 
-| Module                    | Requires `ai`/`zod` | Exports                                                                                                                           |
-| ------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/codemode`    | No                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher` |
-| `@cloudflare/codemode/ai` | Yes                 | `createCodeTool`, `generateTypes`, `ToolDescriptor`, `ToolDescriptors`                                                            |
+| Module                     | Requires                                 | Exports                                                                                                                           |
+| -------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/codemode`     | none                                     | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher` |
+| `@cloudflare/codemode/ai`  | `ai`, `zod`                              | `createCodeTool`, `generateTypes`, `GroupedToolDescriptors`, `ToolDescriptor`, `ToolDescriptors`                                  |
+| `@cloudflare/codemode/mcp` | `@modelcontextprotocol/sdk`, `ai`, `zod` | `codeMcpServer`, `openApiMcpServer`                                                                                               |
 
 ## Limitations
 
-- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` execute immediately inside the sandbox without pausing for approval. Support for approval flows within codemode is planned. For now, do not pass approval-required tools to `createCodeTool` — use them through standard AI SDK tool calling instead.
-- Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
-- Limited to JavaScript execution
+- Tools with `needsApproval` are **excluded** from codemode descriptions and execution
+- Requires a Cloudflare Workers environment for `DynamicWorkerExecutor`
+- Executes JavaScript, not TypeScript
 
 ## Examples
 
-- [`examples/codemode/`](../../examples/codemode/) — Full working example with task management tools
+- [`examples/codemode/`](../../examples/codemode/) — full project-management app using `codemode.pm.*`
+- [`examples/codemode-mcp/`](../../examples/codemode-mcp/) — MCP `code` tool backed by grouped AI SDK tools
+- [`examples/codemode-mcp-openapi/`](../../examples/codemode-mcp-openapi/) — namespaced OpenAPI MCP server with `spec()` + `request()`
 
 ## License
 

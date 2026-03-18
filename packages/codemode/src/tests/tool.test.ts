@@ -1,19 +1,31 @@
 /**
- * Tests for createCodeTool — the function that wires tools + executor into
- * a single AI SDK tool.
+ * Tests for createCodeTool — the function that wires grouped tools + executor
+ * into a single AI SDK tool.
  */
 import { describe, it, expect, vi } from "vitest";
-import { createCodeTool } from "../tool";
 import { z } from "zod";
-import type { ToolDescriptors } from "../tool-types";
-import type { Executor, ExecuteResult } from "../executor";
+import type { ExecuteResult, Executor, ToolFns } from "../executor";
+import { createCodeTool } from "../tool";
+import type { GroupedToolDescriptors } from "../tool-types";
 
-/** A mock executor that records calls and returns configurable results. */
 function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
-  const calls: { code: string; fnNames: string[] }[] = [];
+  const calls: {
+    code: string;
+    groupNames: string[];
+    fnNames: Record<string, string[]>;
+  }[] = [];
   const executor: Executor = {
-    execute: vi.fn(async (code, fns) => {
-      calls.push({ code, fnNames: Object.keys(fns) });
+    execute: vi.fn(async (code: string, fns: ToolFns) => {
+      calls.push({
+        code,
+        groupNames: Object.keys(fns),
+        fnNames: Object.fromEntries(
+          Object.entries(fns).map(([group, groupFns]) => [
+            group,
+            Object.keys(groupFns)
+          ])
+        )
+      });
       return result;
     })
   };
@@ -21,16 +33,20 @@ function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
 }
 
 describe("createCodeTool", () => {
-  const tools: ToolDescriptors = {
-    getWeather: {
-      description: "Get weather for a location",
-      inputSchema: z.object({ location: z.string() }),
-      execute: async (_args: unknown) => ({ temp: 72 })
+  const tools: GroupedToolDescriptors = {
+    weather: {
+      getWeather: {
+        description: "Get weather for a location",
+        inputSchema: z.object({ location: z.string() }),
+        execute: async (_args: unknown) => ({ temp: 72 })
+      }
     },
-    searchWeb: {
-      description: "Search the web",
-      inputSchema: z.object({ query: z.string() }),
-      execute: async (_args: unknown) => ({ results: [] })
+    search: {
+      searchWeb: {
+        description: "Search the web",
+        inputSchema: z.object({ query: z.string() }),
+        execute: async (_args: unknown) => ({ results: [] })
+      }
     }
   };
 
@@ -43,22 +59,23 @@ describe("createCodeTool", () => {
     expect(codeTool.execute).toBeDefined();
   });
 
-  it("should include tool names in the description", () => {
+  it("should include grouped tool names in the description", () => {
     const { executor } = createMockExecutor();
     const codeTool = createCodeTool({ tools, executor });
 
-    expect(codeTool.description).toContain("getWeather");
-    expect(codeTool.description).toContain("searchWeb");
+    expect(codeTool.description).toContain("namespace weather");
+    expect(codeTool.description).toContain("namespace search");
+    expect(codeTool.description).toContain("function getWeather");
+    expect(codeTool.description).toContain("function searchWeb");
   });
 
   it("should include generated types in the description", () => {
     const { executor } = createMockExecutor();
     const codeTool = createCodeTool({ tools, executor });
 
-    // Should contain the generated TypeScript type names
-    expect(codeTool.description).toContain("GetWeatherInput");
-    expect(codeTool.description).toContain("SearchWebInput");
-    expect(codeTool.description).toContain("declare const codemode");
+    expect(codeTool.description).toContain("WeatherGetWeatherInput");
+    expect(codeTool.description).toContain("SearchSearchWebInput");
+    expect(codeTool.description).toContain("declare namespace codemode");
   });
 
   it("should support custom description with {{types}} placeholder", () => {
@@ -71,42 +88,53 @@ describe("createCodeTool", () => {
 
     expect(codeTool.description).toContain("Custom prefix.");
     expect(codeTool.description).toContain("Custom suffix.");
-    expect(codeTool.description).toContain("getWeather");
+    expect(codeTool.description).toContain("function getWeather");
   });
 
-  it("should pass code and extracted fns to executor", async () => {
+  it("should build a namespaced example from the first group and first tool", () => {
+    const { executor } = createMockExecutor();
+    const codeTool = createCodeTool({ tools, executor });
+
+    expect(codeTool.description).toContain(
+      "Example: async () => { const r = await codemode.weather.getWeather({}); return r; }"
+    );
+  });
+
+  it("should pass code and extracted grouped fns to executor", async () => {
     const { executor, calls } = createMockExecutor();
     const codeTool = createCodeTool({ tools, executor });
 
     await codeTool.execute?.(
-      { code: "async () => codemode.getWeather({ location: 'NYC' })" },
+      { code: "async () => codemode.weather.getWeather({ location: 'NYC' })" },
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
     expect(calls).toHaveLength(1);
     expect(calls[0].code).toBe(
-      "async () => codemode.getWeather({ location: 'NYC' })"
+      "async () => codemode.weather.getWeather({ location: 'NYC' })"
     );
-    expect(calls[0].fnNames).toContain("getWeather");
-    expect(calls[0].fnNames).toContain("searchWeb");
+    expect(calls[0].groupNames).toEqual(["weather", "search"]);
+    expect(calls[0].fnNames.weather).toContain("getWeather");
+    expect(calls[0].fnNames.search).toContain("searchWeb");
   });
 
-  it("should extract working execute functions from tools", async () => {
+  it("should extract working execute functions from grouped tools", async () => {
     const executeSpy = vi.fn(async (_args: unknown) => ({ temp: 99 }));
-    const testTools: ToolDescriptors = {
-      myTool: {
-        description: "Test",
-        inputSchema: z.object({ x: z.number() }),
-        execute: executeSpy
+    const testTools: GroupedToolDescriptors = {
+      weather: {
+        myTool: {
+          description: "Test",
+          inputSchema: z.object({ x: z.number() }),
+          execute: executeSpy
+        }
       }
     };
 
-    let capturedFns: Record<string, Function> = {};
+    let capturedFns: ToolFns = {};
     const executor: Executor = {
-      execute: vi.fn(async (code, fns) => {
+      execute: vi.fn(async (_code, fns) => {
         capturedFns = fns;
-        // Actually call the fn to verify it works
-        const result = await fns.myTool({ x: 42 });
+        const result = await fns.weather.myTool({ x: 42 });
         return { result };
       })
     };
@@ -118,26 +146,28 @@ describe("createCodeTool", () => {
     );
 
     expect(executeSpy).toHaveBeenCalledWith({ x: 42 });
-    expect(capturedFns.myTool).toBeDefined();
+    expect(capturedFns.weather.myTool).toBeDefined();
   });
 
   it("should skip tools without execute functions", async () => {
-    const testTools: ToolDescriptors = {
-      withExecute: {
-        description: "Has execute",
-        inputSchema: z.object({}),
-        execute: async () => ({})
-      },
-      withoutExecute: {
-        description: "No execute",
-        inputSchema: z.object({})
+    const testTools: GroupedToolDescriptors = {
+      weather: {
+        withExecute: {
+          description: "Has execute",
+          inputSchema: z.object({}),
+          execute: async () => ({})
+        },
+        withoutExecute: {
+          description: "No execute",
+          inputSchema: z.object({})
+        }
       }
     };
 
     let capturedFnNames: string[] = [];
     const executor: Executor = {
       execute: vi.fn(async (_code, fns) => {
-        capturedFnNames = Object.keys(fns);
+        capturedFnNames = Object.keys(fns.weather);
         return { result: null };
       })
     };
@@ -153,24 +183,28 @@ describe("createCodeTool", () => {
   });
 
   it("should exclude tools with needsApproval: true from fns and description", async () => {
-    const testTools = {
-      safeTool: {
-        description: "Safe tool",
-        inputSchema: z.object({}),
-        execute: async () => ({ ok: true })
+    const testTools: GroupedToolDescriptors = {
+      safe: {
+        safeTool: {
+          description: "Safe tool",
+          inputSchema: z.object({}),
+          execute: async () => ({ ok: true })
+        }
       },
-      dangerousTool: {
-        description: "Dangerous tool",
-        inputSchema: z.object({}),
-        execute: async () => ({ deleted: true }),
-        needsApproval: true
+      dangerous: {
+        dangerousTool: {
+          description: "Dangerous tool",
+          inputSchema: z.object({}),
+          execute: async () => ({ deleted: true }),
+          needsApproval: true
+        }
       }
     };
 
-    let capturedFnNames: string[] = [];
+    let capturedFns: ToolFns = {};
     const executor: Executor = {
       execute: vi.fn(async (_code, fns) => {
-        capturedFnNames = Object.keys(fns);
+        capturedFns = fns;
         return { result: null };
       })
     };
@@ -185,29 +219,33 @@ describe("createCodeTool", () => {
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
-    expect(capturedFnNames).toContain("safeTool");
-    expect(capturedFnNames).not.toContain("dangerousTool");
+    expect(capturedFns.safe.safeTool).toBeDefined();
+    expect(Object.keys(capturedFns.dangerous)).toEqual([]);
   });
 
   it("should exclude tools with needsApproval as a function", async () => {
-    const testTools = {
-      normalTool: {
-        description: "Normal",
-        inputSchema: z.object({}),
-        execute: async () => ({})
+    const testTools: GroupedToolDescriptors = {
+      normal: {
+        normalTool: {
+          description: "Normal",
+          inputSchema: z.object({}),
+          execute: async () => ({})
+        }
       },
-      approvalFnTool: {
-        description: "Approval fn",
-        inputSchema: z.object({}),
-        execute: async () => ({}),
-        needsApproval: async () => true
+      approvals: {
+        approvalFnTool: {
+          description: "Approval fn",
+          inputSchema: z.object({}),
+          execute: async () => ({}),
+          needsApproval: async () => true
+        }
       }
     };
 
-    let capturedFnNames: string[] = [];
+    let capturedFns: ToolFns = {};
     const executor: Executor = {
       execute: vi.fn(async (_code, fns) => {
-        capturedFnNames = Object.keys(fns);
+        capturedFns = fns;
         return { result: null };
       })
     };
@@ -221,8 +259,8 @@ describe("createCodeTool", () => {
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
-    expect(capturedFnNames).toContain("normalTool");
-    expect(capturedFnNames).not.toContain("approvalFnTool");
+    expect(capturedFns.normal.normalTool).toBeDefined();
+    expect(Object.keys(capturedFns.approvals)).toEqual([]);
   });
 
   it("should return { code, result } on success", async () => {
@@ -312,7 +350,6 @@ describe("createCodeTool", () => {
         {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
       );
 
-      // AST normalization wraps the last expression in return(...)
       expect(calls[0].code).toContain("async () => {");
       expect(calls[0].code).toContain("return (fn().catch(console.error))");
     });
@@ -349,7 +386,7 @@ describe("createCodeTool", () => {
       const { executor, calls } = createMockExecutor();
       const codeTool = createCodeTool({ tools, executor });
 
-      const code = `const r = await codemode.getWeather({ location: "NYC" });\nreturn r;`;
+      const code = `const r = await codemode.weather.getWeather({ location: "NYC" });\nreturn r;`;
       await codeTool.execute?.(
         { code },
         {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
@@ -370,7 +407,6 @@ describe("createCodeTool", () => {
         {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
       );
 
-      // Parenthesized arrow is still an ArrowFunctionExpression in the AST
       expect(calls[0].code).toBe("(async () => { return 42; })");
     });
 
@@ -397,7 +433,6 @@ describe("createCodeTool", () => {
         {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
       );
 
-      // Falls back to wrapping in async arrow
       expect(calls[0].code).toContain("async () => {");
       expect(calls[0].code).toContain(code);
     });
@@ -417,17 +452,19 @@ describe("createCodeTool", () => {
 
   it("should preserve closure state across multiple calls", async () => {
     let counter = 0;
-    const testTools: ToolDescriptors = {
-      increment: {
-        description: "Increment counter",
-        inputSchema: z.object({}),
-        execute: async () => ({ count: ++counter })
+    const testTools: GroupedToolDescriptors = {
+      state: {
+        increment: {
+          description: "Increment counter",
+          inputSchema: z.object({}),
+          execute: async () => ({ count: ++counter })
+        }
       }
     };
 
     const executor: Executor = {
       execute: vi.fn(async (_code, fns) => {
-        const result = await fns.increment({});
+        const result = await fns.state.increment({});
         return { result };
       })
     };

@@ -1,10 +1,13 @@
-import { tool, type Tool, asSchema } from "ai";
+import { asSchema, tool, type Tool, type ToolSet } from "ai";
 import { z } from "zod";
-import type { ToolSet } from "ai";
-import { generateTypes, type ToolDescriptors } from "./tool-types";
-import { sanitizeToolName } from "./utils";
-import type { Executor } from "./executor";
+import { type Executor, type ToolFns } from "./executor";
 import { normalizeCode } from "./normalize";
+import {
+  generateTypes,
+  type GroupedToolDescriptors,
+  type ToolDescriptors
+} from "./tool-types";
+import { sanitizeToolName } from "./utils";
 
 const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
 
@@ -15,10 +18,10 @@ Write an async arrow function in JavaScript that returns the result.
 Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
 Do NOT define named functions then call them — just write the arrow function body directly.
 
-Example: async () => { const r = await codemode.searchWeb({ query: "test" }); return r; }`;
+{{example}}`;
 
 export interface CreateCodeToolOptions {
-  tools: ToolDescriptors | ToolSet;
+  tools: GroupedToolDescriptors;
   executor: Executor;
   /**
    * Custom tool description. Use {{types}} as a placeholder for the generated type definitions.
@@ -43,63 +46,90 @@ function hasNeedsApproval(t: Record<string, unknown>): boolean {
   return "needsApproval" in t && t.needsApproval != null;
 }
 
+function buildExample(tools: GroupedToolDescriptors): string {
+  const [firstGroupEntry] = Object.entries(tools);
+  if (!firstGroupEntry) {
+    return "Example: async () => null";
+  }
+
+  const [groupName, groupTools] = firstGroupEntry;
+  const [firstToolEntry] = Object.entries(groupTools);
+  if (!firstToolEntry) {
+    return "Example: async () => null";
+  }
+
+  const [toolName] = firstToolEntry;
+  return `Example: async () => { const r = await codemode.${sanitizeToolName(groupName)}.${sanitizeToolName(toolName)}({}); return r; }`;
+}
+
+function filterApprovalTools(
+  tools: GroupedToolDescriptors
+): GroupedToolDescriptors {
+  const filtered: GroupedToolDescriptors = {};
+
+  for (const [groupName, groupTools] of Object.entries(tools)) {
+    const nextGroup: ToolDescriptors | ToolSet = {};
+    for (const [name, toolDef] of Object.entries(groupTools)) {
+      if (!hasNeedsApproval(toolDef as Record<string, unknown>)) {
+        (nextGroup as Record<string, unknown>)[name] = toolDef;
+      }
+    }
+    filtered[groupName] = nextGroup;
+  }
+
+  return filtered;
+}
+
 export function createCodeTool(
   options: CreateCodeToolOptions
 ): Tool<CodeInput, CodeOutput> {
-  const tools: ToolDescriptors | ToolSet = {};
-  for (const [name, t] of Object.entries(options.tools)) {
-    if (!hasNeedsApproval(t as Record<string, unknown>)) {
-      (tools as Record<string, unknown>)[name] = t;
-    }
-  }
-
-  const types = generateTypes(tools);
+  const tools = filterApprovalTools(options.tools);
+  const typesByGroup = generateTypes(tools);
+  const combinedTypes = Object.values(typesByGroup).join("\n\n");
   const executor = options.executor;
 
-  const description = (options.description ?? DEFAULT_DESCRIPTION).replace(
-    "{{types}}",
-    types
-  );
+  const description = (options.description ?? DEFAULT_DESCRIPTION)
+    .replace("{{types}}", combinedTypes)
+    .replace("{{example}}", buildExample(tools));
 
   return tool({
     description,
     inputSchema: codeSchema,
     execute: async ({ code }) => {
-      // Extract execute functions from tools, keyed by name.
-      // Wrap each with its schema so arguments from the sandbox
-      // are validated before reaching the tool function.
-      const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+      const fns: ToolFns = {};
 
-      for (const [name, t] of Object.entries(tools)) {
-        const execute =
-          "execute" in t
-            ? (t.execute as (args: unknown) => Promise<unknown>)
-            : undefined;
-        if (execute) {
+      for (const [groupName, groupTools] of Object.entries(tools)) {
+        const sanitizedGroupName = sanitizeToolName(groupName);
+        fns[sanitizedGroupName] = {};
+
+        for (const [name, toolDef] of Object.entries(groupTools)) {
+          const execute =
+            "execute" in toolDef
+              ? (toolDef.execute as (args: unknown) => Promise<unknown>)
+              : undefined;
+          if (!execute) continue;
+
           const rawSchema =
-            "inputSchema" in t
-              ? t.inputSchema
-              : "parameters" in t
-                ? (t as Record<string, unknown>).parameters
+            "inputSchema" in toolDef
+              ? toolDef.inputSchema
+              : "parameters" in toolDef
+                ? (toolDef as Record<string, unknown>).parameters
                 : undefined;
 
-          // Use AI SDK's asSchema() to normalize any schema type
-          // (Zod v3/v4, Standard Schema, JSON Schema) into a unified
-          // Schema with an optional .validate() method.
           const schema = rawSchema != null ? asSchema(rawSchema) : undefined;
-
-          fns[sanitizeToolName(name)] = schema?.validate
+          const wrappedExecute = schema?.validate
             ? async (args: unknown) => {
                 const result = await schema.validate!(args);
                 if (!result.success) throw result.error;
                 return execute(result.value);
               }
             : execute;
+
+          fns[sanitizedGroupName][sanitizeToolName(name)] = wrappedExecute;
         }
       }
 
       const normalizedCode = normalizeCode(code);
-
       const executeResult = await executor.execute(normalizedCode, fns);
 
       if (executeResult.error) {

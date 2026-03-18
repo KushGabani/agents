@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const PORT = 8798;
 const e2eDir = dirname(fileURLToPath(import.meta.url));
 const configPath = join(e2eDir, "wrangler.jsonc");
+const hasCloudflareApiToken = Boolean(process.env.CLOUDFLARE_API_TOKEN);
 
 export default defineConfig({
   testDir: e2eDir,
@@ -15,10 +16,12 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}`
   },
-  webServer: {
-    command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT} --inspector-port 0`,
-    port: PORT,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000
-  }
+  webServer: hasCloudflareApiToken
+    ? {
+        command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT} --inspector-port 0`,
+        port: PORT,
+        reuseExistingServer: !process.env.CI,
+        timeout: 30_000
+      }
+    : undefined
 });

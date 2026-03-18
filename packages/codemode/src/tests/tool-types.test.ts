@@ -14,14 +14,29 @@ import { jsonSchema } from "ai";
 import type { ToolSet } from "ai";
 import type { ToolDescriptors } from "../tool-types";
 
-// Helper: cast loosely-typed tool objects for generateTypes
-function genTypes(tools: Record<string, unknown>): string {
-  return generateTypes(tools as unknown as ToolSet);
+function genTypes(
+  tools: Record<string, unknown>,
+  groupName = "github"
+): string {
+  return generateTypes({
+    [groupName]: tools as unknown as ToolSet
+  })[groupName];
 }
 
 describe("generateTypes edge cases", () => {
-  it("should handle empty tool set", () => {
-    expect(generateTypes({})).toBe("declare const codemode: {}");
+  it("should handle empty grouped tool set", () => {
+    expect(generateTypes({})).toEqual({});
+  });
+
+  it("should handle empty groups", () => {
+    expect(generateTypes({ github: {} }).github).toBe(
+      [
+        "declare namespace codemode {",
+        "    namespace github {",
+        "    }",
+        "}"
+      ].join("\n")
+    );
   });
 
   it("should handle MCP tools with input and output schemas (fromJSONSchema)", () => {
@@ -71,17 +86,17 @@ describe("generateTypes edge cases", () => {
       }
     };
 
-    const result = generateTypes(tools);
+    const result = generateTypes({ github: tools }).github;
 
     expect(result).toBe(
       [
-        "type GetWeatherInput = {",
+        "type GithubGetWeatherInput = {",
         "    /** City name */",
         "    city: string;",
         '    units?: "celsius" | "fahrenheit";',
         "    includeForecast?: boolean;",
         "}",
-        "type GetWeatherOutput = {",
+        "type GithubGetWeatherOutput = {",
         "    /** Current temp */",
         "    temperature: number;",
         "    humidity?: number;",
@@ -93,12 +108,14 @@ describe("generateTypes edge cases", () => {
         "    }[];",
         "}",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Get weather for a city",
-        "\t * @param input.city - City name",
-        "\t */",
-        "\tgetWeather: (input: GetWeatherInput) => Promise<GetWeatherOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Get weather for a city",
+        "         * @param input.city - City name",
+        "         */",
+        "        function getWeather(input: GithubGetWeatherInput): Promise<GithubGetWeatherOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -111,14 +128,16 @@ describe("generateTypes edge cases", () => {
 
     expect(result).toBe(
       [
-        "type BrokenInput = unknown",
-        "type BrokenOutput = unknown",
+        "type GithubBrokenInput = unknown",
+        "type GithubBrokenOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Broken tool",
-        "\t */",
-        "\tbroken: (input: BrokenInput) => Promise<BrokenOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Broken tool",
+        "         */",
+        "        function broken(input: GithubBrokenInput): Promise<GithubBrokenOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -131,14 +150,16 @@ describe("generateTypes edge cases", () => {
 
     expect(result).toBe(
       [
-        "type BrokenInput = unknown",
-        "type BrokenOutput = unknown",
+        "type GithubBrokenInput = unknown",
+        "type GithubBrokenOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Broken tool",
-        "\t */",
-        "\tbroken: (input: BrokenInput) => Promise<BrokenOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Broken tool",
+        "         */",
+        "        function broken(input: GithubBrokenInput): Promise<GithubBrokenOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -151,14 +172,16 @@ describe("generateTypes edge cases", () => {
 
     expect(result).toBe(
       [
-        "type BrokenInput = unknown",
-        "type BrokenOutput = unknown",
+        "type GithubBrokenInput = unknown",
+        "type GithubBrokenOutput = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Broken tool",
-        "\t */",
-        "\tbroken: (input: BrokenInput) => Promise<BrokenOutput>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Broken tool",
+        "         */",
+        "        function broken(input: GithubBrokenInput): Promise<GithubBrokenOutput>;",
+        "    }",
         "}"
       ].join("\n")
     );
@@ -194,37 +217,57 @@ describe("generateTypes edge cases", () => {
 
     const result = genTypes(tools);
 
-    // The bad tool falls back to unknown types; good tools are unaffected
     expect(result).toBe(
       [
-        "type Good1Input = {",
+        "type GithubGood1Input = {",
         "    a?: string;",
         "}",
-        "type Good1Output = unknown",
-        "type BadInput = unknown",
-        "type BadOutput = unknown",
-        "type Good2Input = {",
+        "type GithubGood1Output = unknown",
+        "type GithubBadInput = unknown",
+        "type GithubBadOutput = unknown",
+        "type GithubGood2Input = {",
         "    b?: number;",
         "}",
-        "type Good2Output = unknown",
+        "type GithubGood2Output = unknown",
         "",
-        "declare const codemode: {",
-        "\t/**",
-        "\t * Good first",
-        "\t */",
-        "\tgood1: (input: Good1Input) => Promise<Good1Output>;",
-        "",
-        "\t/**",
-        "\t * Bad tool",
-        "\t */",
-        "\tbad: (input: BadInput) => Promise<BadOutput>;",
-        "",
-        "\t/**",
-        "\t * Good second",
-        "\t */",
-        "\tgood2: (input: Good2Input) => Promise<Good2Output>;",
+        "declare namespace codemode {",
+        "    namespace github {",
+        "        /**",
+        "         * Good first",
+        "         */",
+        "        function good1(input: GithubGood1Input): Promise<GithubGood1Output>;",
+        "        /**",
+        "         * Bad tool",
+        "         */",
+        "        function bad(input: GithubBadInput): Promise<GithubBadOutput>;",
+        "        /**",
+        "         * Good second",
+        "         */",
+        "        function good2(input: GithubGood2Input): Promise<GithubGood2Output>;",
+        "    }",
         "}"
       ].join("\n")
+    );
+  });
+
+  it("should sanitize group names in namespaces and type prefixes", () => {
+    const result = genTypes(
+      {
+        "list-issues": {
+          description: "List issues",
+          inputSchema: jsonSchema({
+            type: "object" as const,
+            properties: { repo: { type: "string" as const } }
+          })
+        }
+      },
+      "my-github"
+    );
+
+    expect(result).toContain("type MyGithubListIssuesInput = {");
+    expect(result).toContain("namespace my_github {");
+    expect(result).toContain(
+      "function list_issues(input: MyGithubListIssuesInput): Promise<MyGithubListIssuesOutput>;"
     );
   });
 });

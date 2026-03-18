@@ -5,7 +5,14 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/index.ts", "src/ai.ts", "src/mcp.ts"],
+    entry: [
+      "src/index.ts",
+      "src/ai.ts",
+      "src/mcp.ts",
+      "src/normalize.ts",
+      "src/utils.ts",
+      "src/json-schema-types.ts"
+    ],
     deps: {
       skipNodeModulesBundle: true,
       neverBundle: ["cloudflare:workers"]

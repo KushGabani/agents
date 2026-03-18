@@ -34,7 +34,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 interface ExecuteRequest {
   code: string;
   callbackUrl: string;
-  tools: string[];
+  tools: Record<string, string[]>;
 }
 
 async function handleExecute(
@@ -43,19 +43,24 @@ async function handleExecute(
   const { code, callbackUrl, tools } = body;
   const logs: string[] = [];
 
-  // Build a codemode proxy that routes tool calls back via HTTP
-  const codemode: Record<string, (args: unknown) => Promise<unknown>> = {};
-  for (const toolName of tools) {
-    codemode[toolName] = async (args: unknown) => {
-      const res = await fetch(`${callbackUrl}/${toolName}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(args ?? {})
-      });
-      const data = (await res.json()) as { result?: unknown; error?: string };
-      if (data.error) throw new Error(data.error);
-      return data.result;
-    };
+  const codemode: Record<
+    string,
+    Record<string, (args: unknown) => Promise<unknown>>
+  > = {};
+  for (const [namespace, toolNames] of Object.entries(tools)) {
+    codemode[namespace] = {};
+    for (const toolName of toolNames) {
+      codemode[namespace][toolName] = async (args: unknown) => {
+        const res = await fetch(`${callbackUrl}/${namespace}/${toolName}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(args ?? {})
+        });
+        const data = (await res.json()) as { result?: unknown; error?: string };
+        if (data.error) throw new Error(data.error);
+        return data.result;
+      };
+    }
   }
 
   const sandbox = {
@@ -79,9 +84,6 @@ async function handleExecute(
   const context = vm.createContext(sandbox);
 
   try {
-    // The code is expected to be an async arrow function expression, e.g.:
-    //   async () => { ... }
-    // We evaluate it to get the function, then call it.
     const script = new vm.Script(`(${code})()`, {
       filename: "codemode-exec.js"
     });
@@ -98,7 +100,6 @@ async function handleExecute(
 
 const server = createServer(
   async (req: IncomingMessage, res: ServerResponse) => {
-    // CORS headers for local dev
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -114,7 +115,7 @@ const server = createServer(
         const raw = await readBody(req);
         const body = JSON.parse(raw) as ExecuteRequest;
 
-        if (!body.code || !body.callbackUrl || !Array.isArray(body.tools)) {
+        if (!body.code || !body.callbackUrl || !body.tools) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -138,7 +139,6 @@ const server = createServer(
       return;
     }
 
-    // Health check
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
